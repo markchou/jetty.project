@@ -45,7 +45,7 @@ public interface MessageHandlerInvoker
 
     public Object invoke(Object message);
     public Object invoke(Object message, boolean last);
-    
+
     public static class Builder
     {
         private static class OnMessageMethodBuilder
@@ -112,7 +112,7 @@ public interface MessageHandlerInvoker
                             if (partial && !String.class.equals(type) && !ByteBuffer.class.equals(type) &&!byte[].class.equals(type))
                                 throw new IllegalArgumentException("wrong type for partial message");
 
-                            builders.add(new OnMessageMethodBuilder(builder,true,type));
+                            builders.add(new OnMessageMethodBuilder(builder,partial,type));
                         }
                     }
                 }
@@ -188,7 +188,7 @@ public interface MessageHandlerInvoker
                 @Override
                 public Class<?> getReturnType()
                 {
-                    return Void.class;
+                    return Void.TYPE;
                 }
 
                 @Override
@@ -227,7 +227,7 @@ public interface MessageHandlerInvoker
                 @Override
                 public Class<?> getReturnType()
                 {
-                    return Void.class;
+                    return Void.TYPE;
                 }
 
                 @Override

@@ -3,6 +3,7 @@ package org.eclipse.jetty.websocket.jsr356;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.Principal;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -19,6 +20,7 @@ import javax.websocket.Extension;
 import javax.websocket.MessageHandler;
 import javax.websocket.OnClose;
 import javax.websocket.OnError;
+import javax.websocket.OnMessage;
 import javax.websocket.OnOpen;
 import javax.websocket.RemoteEndpoint;
 import javax.websocket.Session;
@@ -35,6 +37,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
@@ -63,6 +66,8 @@ public class EndpointInvokerTest
         }
     };
 
+    public static EndpointInvoker endpointInvoker;
+
     public static final Session SESSION = new Session()
     {
         @Override
@@ -80,13 +85,13 @@ public class EndpointInvokerTest
         @Override
         public <T> void addMessageHandler(Class<T> clazz, MessageHandler.Whole<T> handler)
         {
-
+            endpointInvoker.addMessageHandler(clazz,handler);
         }
 
         @Override
         public <T> void addMessageHandler(Class<T> clazz, MessageHandler.Partial<T> handler)
         {
-
+            endpointInvoker.addMessageHandler(clazz,handler);
         }
 
         @Override
@@ -552,4 +557,221 @@ public class EndpointInvokerTest
         {}
     }
 
+
+    @ServerEndpoint("/test/{one}/{two}/{three}")
+    public static class AnnotatedHandler
+    {
+        @OnOpen
+        public void onOpen(Session session, EndpointConfig config)
+        {
+            history.add("onOpen");
+            history.add(session);
+            history.add(config);
+        }
+
+        @OnMessage
+        public void onMessage(ByteBuffer message, boolean last, Session session)
+        {
+            history.add("onMessage");
+            history.add(message);
+            history.add(last);
+            history.add(session);
+        }
+
+        @OnMessage
+        public Number onMessage(@PathParam("one") String one, String message,@PathParam("two") String two)
+        {
+            history.add("onMessage");
+            history.add(message);
+            history.add(one);
+            history.add(two);
+            return new Integer(Integer.parseInt(one) + Integer.parseInt(two));
+        }
+    }
+
+    @Test
+    public void testAnnotatedHandler()
+    {
+        AnnotatedHandler endp = new AnnotatedHandler();
+        EndpointInvoker invoker = new EndpointInvoker.Builder(AnnotatedHandler.class).build(endp,SESSION,parameters);
+
+        invoker.onOpen(CONFIG);
+        assertThat(invoker.onMessageHandlers().size(),is(2));
+
+        MessageHandlerInvoker whole = null;
+        MessageHandlerInvoker partial = null;
+
+        for (MessageHandlerInvoker i : invoker.onMessageHandlers())
+        {
+            if (i.isPartial())
+                partial = i;
+            else
+                whole = i;
+        }
+
+        assertThat(partial,notNullValue());
+        assertThat(whole,notNullValue());
+
+        assertTrue(ByteBuffer.class.equals(partial.getMessageType()));
+        assertTrue(Void.TYPE.equals(partial.getReturnType()));
+
+        ByteBuffer data = BufferUtil.toBuffer("Hello");
+        partial.invoke(data,true);
+
+        assertThat(history.size(), is(7));
+        assertThat(history,Matchers.contains(
+                "onOpen",SESSION,CONFIG,
+                "onMessage",data,Boolean.TRUE,SESSION));
+
+        try
+        {
+            partial.invoke("Hello");
+            Assert.fail();
+        }
+        catch(Throwable th)
+        {}
+
+        history.clear();
+
+        assertTrue(String.class.equals(whole.getMessageType()));
+        assertTrue(Number.class.equals(whole.getReturnType()));
+
+        Object response = whole.invoke("Hello");
+        assertThat(response,is(new Integer(3)));
+
+        assertThat(history.size(), is(4));
+        assertThat(history,Matchers.contains(
+                "onMessage","Hello","1","2"));
+
+        try
+        {
+            whole.invoke("He", false);
+            Assert.fail();
+        }
+        catch(Throwable th)
+        {}
+
+    }
+
+
+    @ServerEndpoint("/test")
+    public static class AddedHandler
+    {
+        @OnOpen
+        public void onOpen(Session session, EndpointConfig config)
+        {
+            history.add("onOpen");
+            history.add(session);
+            history.add(config);
+            session.addMessageHandler(byte[].class, new MessageHandler.Partial<byte[]>()
+            {
+                @Override
+                public void onMessage(byte[] message, boolean last)
+                {
+                    history.add("onMessage");
+                    history.add(message);
+                    history.add(last);
+                }
+            });
+
+            session.addMessageHandler(String.class, new MessageHandler.Whole<String>()
+            {
+                @Override
+                public void onMessage(String message)
+                {
+                    history.add("onMessage");
+                    history.add(message);
+                }
+            });
+
+            session.addMessageHandler(Number.class, new MessageHandler.Whole<Number>()
+            {
+                @Override
+                public void onMessage(Number message)
+                {
+                    history.add("onMessage");
+                    history.add(message);
+                }
+            });
+
+        }
+    }
+
+    @Test
+    public void testAddedHandler()
+    {
+        AddedHandler endp = new AddedHandler();
+        EndpointInvoker invoker = new EndpointInvoker.Builder(AddedHandler.class).build(endp,SESSION,parameters);
+        endpointInvoker = invoker;
+
+        invoker.onOpen(CONFIG);
+        assertThat(invoker.onMessageHandlers().size(),is(3));
+
+        MessageHandlerInvoker whole = null;
+        MessageHandlerInvoker partial = null;
+        MessageHandlerInvoker other = null;
+
+        for (MessageHandlerInvoker i : invoker.onMessageHandlers())
+        {
+            if (i.isPartial())
+                partial = i;
+            else if (String.class.equals(i.getMessageType()))
+                whole = i;
+            else
+                other = i;
+        }
+
+        assertThat(partial,notNullValue());
+        assertThat(whole,notNullValue());
+        assertThat(other,notNullValue());
+
+        assertTrue(byte[].class.equals(partial.getMessageType()));
+        assertTrue(Void.TYPE.equals(partial.getReturnType()));
+
+        byte[] data = "Hello".getBytes(StandardCharsets.UTF_8);
+        partial.invoke(data,true);
+
+        assertThat(history.size(), is(6));
+        assertThat(history,Matchers.contains(
+                "onOpen",SESSION,CONFIG,
+                "onMessage",data,Boolean.TRUE));
+
+        try
+        {
+            partial.invoke("Hello");
+            Assert.fail();
+        }
+        catch(Throwable th)
+        {}
+
+        history.clear();
+
+        assertTrue(String.class.equals(whole.getMessageType()));
+        assertTrue(Void.TYPE.equals(whole.getReturnType()));
+
+        whole.invoke("Hello");
+
+        assertThat(history.size(), is(2));
+        assertThat(history,Matchers.contains(
+                "onMessage","Hello"));
+
+        try
+        {
+            whole.invoke("He", false);
+            Assert.fail();
+        }
+        catch(Throwable th)
+        {}
+
+        history.clear();
+
+        assertTrue(Number.class.equals(other.getMessageType()));
+        assertTrue(Void.TYPE.equals(other.getReturnType()));
+
+        other.invoke(new Integer(42));
+
+        assertThat(history.size(), is(2));
+        assertThat(history,Matchers.contains(
+                "onMessage",new Integer(42)));
+    }
 }
