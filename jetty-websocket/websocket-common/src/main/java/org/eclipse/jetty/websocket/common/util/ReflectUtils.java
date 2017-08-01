@@ -25,6 +25,7 @@ import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
+import java.util.Arrays;
 import java.util.regex.Pattern;
 import java.util.ArrayList;
 import java.util.List;
@@ -543,5 +544,19 @@ public class ReflectUtils
     public static void append(StringBuilder str, Method method)
     {
         append(str, null, method);
+    }
+
+
+    /**
+     * @param pojo The class to test
+     * @param annotation The annotations to test for
+     * @return true IFF the pojo class declares any of the annotations
+     */
+    public static boolean isAnnotatedWithDeclared(Class<?> pojo, Class<? extends Annotation>... annotation)
+    {
+        for (Class<? extends Annotation> a : annotation)
+            if (pojo.getDeclaredAnnotation(a)!=null)
+                return true;
+        return false;
     }
 }

@@ -18,12 +18,9 @@
 
 package org.eclipse.jetty.websocket.jsr356;
 
-import java.lang.annotation.Annotation;
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.reflect.AnnotatedType;
 import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -32,13 +29,12 @@ import java.util.Map;
 import java.util.Set;
 
 import javax.websocket.ClientEndpoint;
-import javax.websocket.Endpoint;
 import javax.websocket.MessageHandler;
+import javax.websocket.OnMessage;
 import javax.websocket.Session;
-import javax.websocket.server.PathParam;
 import javax.websocket.server.ServerEndpoint;
 
-import com.sun.xml.internal.ws.client.sei.MethodHandler;
+import org.eclipse.jetty.websocket.common.util.ReflectUtils;
 
 
 public interface MessageHandlerInvoker
@@ -47,11 +43,25 @@ public interface MessageHandlerInvoker
     Class<?> getMessageType();
     boolean isPartial();
 
+    public Object invoke(Object message);
     public Object invoke(Object message, boolean last);
     
     public static class Builder
     {
-        private final List<MethodHandle> methods = new ArrayList<>();
+        private static class OnMessageMethodBuilder
+        {
+            final EndpointMethodInvoker.Builder builder;
+            final boolean partial;
+            final Class<?> type;
+
+            private OnMessageMethodBuilder(EndpointMethodInvoker.Builder builder, boolean partial, Class<?> type)
+            {
+                this.builder = builder;
+                this.partial = partial;
+                this.type = type;
+            }
+        }
+        private final List<OnMessageMethodBuilder> builders = new ArrayList<>();
 
         public Builder(
                 Class<?> handlerClass,
@@ -60,24 +70,52 @@ public interface MessageHandlerInvoker
         {
             try
             {
-                MethodHandles.Lookup lookup = MethodHandles.lookup();
-
                 if (MessageHandler.Whole.class.isAssignableFrom(handlerClass))
                 {
-                    methods.add(lookup.unreflect(MessageHandler.Whole.class.getMethod("onMessage", Object.class)));
+                    Class<?> generic = ReflectUtils.findGenericClassFor(handlerClass,MessageHandler.Whole.class);
+                    Method m = ReflectUtils.findMethod(handlerClass,"onMessage", generic);
+                    builders.add(new OnMessageMethodBuilder(new EndpointMethodInvoker.Builder(m,parameterNames),false, generic));
                 }
 
                 if (MessageHandler.Partial.class.isAssignableFrom(handlerClass))
                 {
-                    methods.add(lookup.unreflect(MessageHandler.Partial.class.getMethod("onMessage", Object.class, boolean.class)));
+                    Class<?> generic = ReflectUtils.findGenericClassFor(handlerClass,MessageHandler.Partial.class);
+                    Method m = ReflectUtils.findMethod(handlerClass,"onMessage", generic, boolean.class);
+                    builders.add(new OnMessageMethodBuilder(new EndpointMethodInvoker.Builder(m,parameterNames),true, generic));
                 }
 
-                if (handlerClass.getDeclaredAnnotation(ServerEndpoint.class)!=null || handlerClass.getDeclaredAnnotation(ClientEndpoint.class)!=null)
+                if (ReflectUtils.isAnnotatedWithDeclared(handlerClass,ServerEndpoint.class,ClientEndpoint.class))
                 {
-                    // TODO scan for annotated methods
-                }
+                    Method[] methods = ReflectUtils.findAnnotatedMethods(handlerClass, OnMessage.class);
+                    if (methods!=null)
+                    {
+                        for (Method m: methods)
+                        {
+                            EndpointMethodInvoker.Builder builder = new EndpointMethodInvoker.Builder(m, parameterNames);
+                            Class<?>[] types = builder.getNonParameterTypes();
+                            int args = types.length;
+                            Class<?> type = null;
+                            boolean partial = false;
+                            for (Class<?> t : types)
+                            {
+                                if (Session.class.isAssignableFrom(t))
+                                    args--;
+                                else if (Boolean.class.equals(t) || boolean.class.equals(t))
+                                    partial = true;
+                                else
+                                    type = t;
+                            }
 
-                // TODO validate parameters
+                            if ((partial && args!=2) || (!partial && args!=1))
+                                throw new IllegalArgumentException("wrong number of args");
+
+                            if (partial && !String.class.equals(type) && !ByteBuffer.class.equals(type) &&!byte[].class.equals(type))
+                                throw new IllegalArgumentException("wrong type for partial message");
+
+                            builders.add(new OnMessageMethodBuilder(builder,true,type));
+                        }
+                    }
+                }
             }
             catch(Exception e)
             {
@@ -85,11 +123,57 @@ public interface MessageHandlerInvoker
             }   
         }
 
-        public Collection<MessageHandlerInvoker> build(final Object instance, final Session session, Map<String,String> parameters) throws IllegalArgumentException
+        public List<MessageHandlerInvoker> build(final Object instance, final Session session, Map<String,String> parameters) throws IllegalArgumentException
         {
             List<MessageHandlerInvoker> invokers = new ArrayList<>();
 
-            // TODO populate!
+            for (OnMessageMethodBuilder builder: builders)
+            {
+                final EndpointMethodInvoker invoker = builder.builder.build(instance, session, parameters);
+                final Method method = builder.builder.getMethod();
+                final Class<?> type = builder.type;
+                final boolean partial = builder.partial;
+
+                invokers.add(new MessageHandlerInvoker()
+                {
+                    @Override
+                    public Class<?> getReturnType()
+                    {
+                        return method.getReturnType();
+                    }
+
+                    @Override
+                    public Class<?> getMessageType()
+                    {
+                        return type;
+                    }
+
+                    @Override
+                    public boolean isPartial()
+                    {
+                        return partial;
+                    }
+
+
+                    @Override
+                    public Object invoke(Object message)
+                    {
+                        if (partial)
+                            throw new IllegalStateException("Partial invoker!");
+                        return invoker.invoke(message);
+                    }
+
+                    @Override
+                    public Object invoke(Object message, boolean last)
+                    {
+                        if (!partial)
+                            throw new IllegalStateException("Not partial invoker!");
+                        return invoker.invoke(message,last?Boolean.TRUE:Boolean.FALSE);
+                    }
+
+                });
+
+            }
 
             return invokers;
         }
@@ -120,12 +204,16 @@ public interface MessageHandlerInvoker
                 }
 
                 @Override
-                public Object invoke(Object message, boolean last)
+                public Object invoke(Object message)
                 {
-                    if (!last)
-                        throw new IllegalStateException();
                     handler.onMessage((T)message);
                     return null;
+                }
+
+                @Override
+                public Object invoke(Object message, boolean last)
+                {
+                    throw new IllegalStateException();
                 }
             });
         }
@@ -152,6 +240,12 @@ public interface MessageHandlerInvoker
                 public boolean isPartial()
                 {
                     return true;
+                }
+
+                @Override
+                public Object invoke(Object message)
+                {
+                    throw new IllegalStateException();
                 }
 
                 @Override

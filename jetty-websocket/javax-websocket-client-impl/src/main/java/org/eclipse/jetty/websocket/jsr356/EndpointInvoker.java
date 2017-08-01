@@ -22,6 +22,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -49,7 +50,7 @@ public interface EndpointInvoker
     public void onOpen(EndpointConfig config);
     public void onClose(CloseReason reason);
     public void onError(Throwable error);
-    public Collection<MessageHandlerInvoker> onMessageHandlers();
+    public List<MessageHandlerInvoker> onMessageHandlers();
 
     public <T> void addMessageHandler(Class<T> clazz, MessageHandler.Whole<T> handler);
     public <T> void addMessageHandler(Class<T> clazz, MessageHandler.Partial<T> handler);
@@ -70,14 +71,16 @@ public interface EndpointInvoker
 
         public Builder(Class<?> endpClass,UriTemplatePathSpec pathSpec) throws IllegalArgumentException
         {
+            if (pathSpec==null)
+                throw new IllegalArgumentException("No pathSpec!");
             try
             {
                 this.endpClass = endpClass;
                 this.pathSpec = pathSpec;
                 Set<String> parameterNames = new HashSet<>(Arrays.asList(pathSpec.getVariables()));
-                onOpenBuilder = new EndpointMethodInvoker.Builder(endpClass, "onOpenBuilder", new Class[] {Session.class, EndpointConfig.class}, OnOpen.class, parameterNames);
-                onCloseBuilder = new EndpointMethodInvoker.Builder(endpClass, "onCloseBuilder", new Class[] {Session.class, CloseReason.class}, OnClose.class, parameterNames);
-                onErrorBuilder = new EndpointMethodInvoker.Builder(endpClass, "onErrorBuilder", new Class[] {Session.class, Throwable.class}, OnError.class, parameterNames);
+                onOpenBuilder = new EndpointMethodInvoker.Builder(endpClass, "onOpen", new Class[] {Session.class, EndpointConfig.class}, OnOpen.class, parameterNames);
+                onCloseBuilder = new EndpointMethodInvoker.Builder(endpClass, "onClose", new Class[] {Session.class, CloseReason.class}, OnClose.class, parameterNames);
+                onErrorBuilder = new EndpointMethodInvoker.Builder(endpClass, "onError", new Class[] {Session.class, Throwable.class}, OnError.class, parameterNames);
                 onMessageBuilder = new MessageHandlerInvoker.Builder(endpClass, parameterNames);
             }
             catch(Throwable th)
@@ -118,7 +121,7 @@ public interface EndpointInvoker
             final EndpointMethodInvoker onOpen = this.onOpenBuilder.build(instance, session, parameters);
             final EndpointMethodInvoker onClose = this.onCloseBuilder.build(instance, session, parameters);
             final EndpointMethodInvoker onError = this.onErrorBuilder.build(instance, session, parameters);
-            final Collection<MessageHandlerInvoker> onMessage = this.onMessageBuilder.build(instance, session, parameters);
+            final List<MessageHandlerInvoker> onMessage = this.onMessageBuilder.build(instance, session, parameters);
 
             return new EndpointInvoker()
             {
@@ -141,7 +144,7 @@ public interface EndpointInvoker
                 }
 
                 @Override
-                public Collection<MessageHandlerInvoker> onMessageHandlers()
+                public List<MessageHandlerInvoker> onMessageHandlers()
                 {
                     return onMessage;
                 }

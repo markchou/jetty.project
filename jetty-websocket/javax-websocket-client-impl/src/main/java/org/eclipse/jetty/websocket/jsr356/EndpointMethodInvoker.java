@@ -21,6 +21,8 @@ package org.eclipse.jetty.websocket.jsr356;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.AnnotatedType;
 import java.lang.reflect.Method;
+import java.lang.reflect.Type;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
 
@@ -30,14 +32,31 @@ import javax.websocket.Session;
 import javax.websocket.server.PathParam;
 import javax.websocket.server.ServerEndpoint;
 
+import org.eclipse.jetty.websocket.common.util.ReflectUtils;
+
 
 public interface EndpointMethodInvoker
 {
-    public void invoke(Object arg);
-    
+    public Object invoke(Object arg);
+    public Object invoke(Object arg, boolean bool);
+
+    public static final EndpointMethodInvoker NOOP = new EndpointMethodInvoker()
+    {
+        @Override
+        public Object invoke(Object arg)
+        {
+            return null;
+        }
+
+        @Override
+        public Object invoke(Object arg, boolean bool)
+        {
+            return null;
+        }
+    };
+
     public static class Builder
     {
-        // TODO convert to MethodHandle
         private final Method method;
         private final String[] paramNames;
 
@@ -45,43 +64,22 @@ public interface EndpointMethodInvoker
             Class<?> endpClass,
             String methodName,
             Class<?>[] methodArgs,
-            Class<?> annotation,
+            Class<? extends Annotation> annotation,
             Set<String> parameterNames
             ) throws IllegalArgumentException
         {
             try
             {
-                Method classMethod = null;
-                Method annotatedMethod = null;
-
-                if (Endpoint.class.isAssignableFrom(endpClass))
-                    classMethod = Endpoint.class.getMethod(methodName,methodArgs);
-
-                boolean annotated = endpClass.getDeclaredAnnotation(ServerEndpoint.class)!=null || endpClass.getDeclaredAnnotation(ClientEndpoint.class)!=null;
-
-                if (annotated)
-                {
-                    // TODO consider private methods in the class hierarchy?
-                    for (Method m : endpClass.getMethods())
-                    {
-                        for (Annotation a : m.getAnnotations())
-                        {
-                            if (annotation.isInstance(a))
-                            {
-                                if (annotatedMethod!=null)
-                                    throw new IllegalArgumentException();
-                                annotatedMethod = m;
-                            }
-                        }
-                    }
-                }
+                Method classMethod = (Endpoint.class.isAssignableFrom(endpClass))
+                        ?ReflectUtils.findMethod(endpClass,methodName,methodArgs):null;
+                Method annotatedMethod = ReflectUtils.isAnnotatedWithDeclared(endpClass,ServerEndpoint.class,ClientEndpoint.class)
+                        ?ReflectUtils.findAnnotatedMethod(endpClass,annotation):null;
 
                 if (classMethod!=null && annotatedMethod!=null)
                     throw new IllegalArgumentException();
 
                 this.method = classMethod!=null ? classMethod : annotatedMethod;
                 this.paramNames = method==null ? null : validate(method,parameterNames);
-
             }
             catch(Exception e)
             {
@@ -89,22 +87,55 @@ public interface EndpointMethodInvoker
             }   
         }
 
+        public Builder(Method method, Set<String> parameterNames)
+        {
+            this.method = method;
+            this.paramNames = validate(method,parameterNames);
+        }
+
+        public Method getMethod()
+        {
+            return method;
+        }
+
+        public Class<?>[] getNonParameterTypes()
+        {
+            int n=0;
+            for (int i=0; i<paramNames.length; i++)
+                if (paramNames[i]==null)
+                    n++;
+            Class<?>[] pt = method.getParameterTypes();
+            Class<?>[] types = new Class<?>[n];
+            n=0;
+            for (int i=0; i<paramNames.length; i++)
+                if (paramNames[i]==null)
+                    types[n++]=pt[i];
+            return types;
+        }
+
         private static String[] validate(Method method, Set<String> parameterNames)
         {
-            AnnotatedType[] types = method.getAnnotatedParameterTypes();
+            Class<?>[] types = method.getParameterTypes();
+            Annotation[][] annotations = method.getParameterAnnotations();
+
             String[] names = new String[types.length];
             for (int i=0; i<types.length; i++)
             {
-                PathParam pp = types[i].getAnnotation(PathParam.class);
-                if (pp!=null)
+                for (int j=0; j<annotations[i].length; j++)
                 {
-                    names[i] = pp.value();
-                    if (names[i]==null)
-                        throw new IllegalArgumentException();
-                    if (!parameterNames.contains(names[i]))
-                        throw new IllegalArgumentException();
+                    if (PathParam.class.isInstance(annotations[i][j]))
+                    {
+                        PathParam pp = (PathParam)annotations[i][j];
+                        if (names[i]!=null)
+                            throw new IllegalArgumentException("Duplicate annotation");
+                        names[i] = pp.value();
+                        if (names[i] == null)
+                            throw new IllegalArgumentException();
+                        if (!parameterNames.contains(names[i]))
+                            throw new IllegalArgumentException();
+                    }
                 }
-                
+
                 // TODO validate either parameter or known type.
             }
             return names;
@@ -112,6 +143,9 @@ public interface EndpointMethodInvoker
         
         public EndpointMethodInvoker build(final Object instance, final Session session, Map<String,String> parameters) throws IllegalArgumentException
         {
+            if (method==null)
+                return NOOP;
+
             final Class<?>[] types = method.getParameterTypes();
             final Object[] paramValues = new Object[types.length];
             for (int i=0; i<types.length; i++)
@@ -128,24 +162,37 @@ public interface EndpointMethodInvoker
             return new EndpointMethodInvoker()
             {
                 @Override
-                public void invoke(Object arg)
+                public Object invoke(Object arg)
+                {
+                    return invoke(arg,null);
+                }
+
+                @Override
+                public Object invoke(Object arg, boolean bool)
+                {
+                    return invoke(arg,bool?Boolean.TRUE:Boolean.FALSE);
+                }
+
+                Object invoke(Object arg, Boolean bool)
                 {
                     Object[] args = new Object[types.length];
                     for (int i=0; i<types.length; i++)
                     {
                         if (paramNames[i]!=null)
                             args[i] = paramValues[i];
-                        else if (types[i].isAssignableFrom(Session.class))
+                        else if (Session.class.isAssignableFrom(types[i]))
                             args[i] = session;
+                        else if (bool!=null && types[i]==Boolean.class || types[i]==boolean.class)
+                            args[i] = bool;
                         else if (arg!=null && types[i].isAssignableFrom(arg.getClass()))
                             args[i] = arg;
-                        else
-                            throw new IllegalStateException();
+                        else if (arg!=null)
+                            throw new IllegalStateException("unknown arg: "+arg+" of type "+arg.getClass());
                     }
-                    
+
                     try
                     {
-                        method.invoke(instance,args);
+                        return method.invoke(instance,args);
                     }
                     catch(Throwable th)
                     {
