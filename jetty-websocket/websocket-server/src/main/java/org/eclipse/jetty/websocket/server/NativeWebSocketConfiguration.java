@@ -117,31 +117,7 @@ public class NativeWebSocketConfiguration extends ContainerLifeCycle implements 
         }
         mappings.put(pathSpec, wsCreator);
     }
-    
-    /**
-     * Manually add a WebSocket mapping.
-     *
-     * @param spec the pathspec to respond on
-     * @param creator the websocket creator to activate on the provided mapping
-     * @deprecated use {@link #addMapping(PathSpec, WebSocketCreator)} instead.
-     */
-    @Deprecated
-    public void addMapping(org.eclipse.jetty.websocket.server.pathmap.PathSpec spec, WebSocketCreator creator)
-    {
-        if (spec instanceof org.eclipse.jetty.websocket.server.pathmap.ServletPathSpec)
-        {
-            addMapping(new ServletPathSpec(spec.getSpec()), creator);
-        }
-        else if (spec instanceof org.eclipse.jetty.websocket.server.pathmap.RegexPathSpec)
-        {
-            addMapping(new RegexPathSpec(spec.getSpec()), creator);
-        }
-        else
-        {
-            throw new RuntimeException("Unsupported (Deprecated) PathSpec implementation type: " + spec.getClass().getName());
-        }
-    }
-    
+
     /**
      * Manually add a WebSocket mapping.
      *

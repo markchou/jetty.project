@@ -52,20 +52,6 @@ public class WebSocketUpgradeHandlerWrapper extends HandlerWrapper implements Ma
     {
         this.configuration.addMapping(spec, creator);
     }
-    
-    /**
-     * Add a mapping.
-     *
-     * @param spec the path spec to use
-     * @param creator the creator for the mapping
-     * @deprecated use {@link #addMapping(PathSpec, WebSocketCreator)} instead.
-     */
-    @Override
-    @Deprecated
-    public void addMapping(org.eclipse.jetty.websocket.server.pathmap.PathSpec spec, WebSocketCreator creator)
-    {
-        configuration.addMapping(spec, creator);
-    }
 
     @Override
     public void addMapping(String spec, WebSocketCreator creator)

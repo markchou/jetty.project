@@ -134,16 +134,6 @@ public class WebSocketUpgradeFilter implements Filter, MappedWebSocketCreator, D
     {
         configuration.addMapping(spec, creator);
     }
-    
-    /**
-     * @deprecated use new {@link #addMapping(org.eclipse.jetty.http.pathmap.PathSpec, WebSocketCreator)} instead
-     */
-    @Deprecated
-    @Override
-    public void addMapping(org.eclipse.jetty.websocket.server.pathmap.PathSpec spec, WebSocketCreator creator)
-    {
-        configuration.addMapping(spec, creator);
-    }
 
     @Override
     public void addMapping(String spec, WebSocketCreator creator)
