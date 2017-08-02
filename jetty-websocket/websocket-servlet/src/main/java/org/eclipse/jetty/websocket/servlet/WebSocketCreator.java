@@ -21,11 +21,9 @@ package org.eclipse.jetty.websocket.servlet;
 /**
  * Abstract WebSocket creator interface.
  * <p>
- * Should you desire filtering of the WebSocket object creation due to criteria such as origin or sub-protocol, then you will be required to implement a custom
- * WebSocketCreator implementation.
- * <p>
- * This has been moved from the WebSocketServlet to a standalone class managed by the WebSocketServerFactory due to need of WebSocket {@link org.eclipse.jetty.websocket.api.extensions.Extension}s that
- * require the ability to create new websockets (such as the mux extension)
+ * Should you desire filtering of the WebSocket object creation due to criteria such as origin
+ * or sub-protocol, then you will be required to implement a custom WebSocketCreator implementation.
+ * </p>
  */
 public interface WebSocketCreator
 {
