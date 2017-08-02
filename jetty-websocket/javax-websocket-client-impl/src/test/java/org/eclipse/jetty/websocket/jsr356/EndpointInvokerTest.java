@@ -78,9 +78,7 @@ public class EndpointInvokerTest
 
         @Override
         public void addMessageHandler(MessageHandler handler) throws IllegalStateException
-        {
-
-        }
+        {}
 
         @Override
         public <T> void addMessageHandler(Class<T> clazz, MessageHandler.Whole<T> handler)
@@ -102,9 +100,7 @@ public class EndpointInvokerTest
 
         @Override
         public void removeMessageHandler(MessageHandler handler)
-        {
-
-        }
+        {}
 
         @Override
         public String getProtocolVersion()
@@ -144,15 +140,11 @@ public class EndpointInvokerTest
 
         @Override
         public void setMaxIdleTimeout(long milliseconds)
-        {
-
-        }
+        {}
 
         @Override
         public void setMaxBinaryMessageBufferSize(int length)
-        {
-
-        }
+        {}
 
         @Override
         public int getMaxBinaryMessageBufferSize()
@@ -162,9 +154,7 @@ public class EndpointInvokerTest
 
         @Override
         public void setMaxTextMessageBufferSize(int length)
-        {
-
-        }
+        {}
 
         @Override
         public int getMaxTextMessageBufferSize()
@@ -192,15 +182,11 @@ public class EndpointInvokerTest
 
         @Override
         public void close() throws IOException
-        {
-
-        }
+        {}
 
         @Override
         public void close(CloseReason closeReason) throws IOException
-        {
-
-        }
+        {}
 
         @Override
         public URI getRequestURI()
