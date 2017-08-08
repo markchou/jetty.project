@@ -41,6 +41,9 @@ public class MessageInputStream extends InputStream implements MessageSink
 {
     private static final Logger LOG = Log.getLogger(MessageInputStream.class);
     private static final FrameCallbackBuffer EOF = new FrameCallbackBuffer(new FrameCallback.Adapter(), ByteBuffer.allocate(0).asReadOnlyBuffer());
+
+    // TODO Why is this a deque?  If a frame is not consumed, then the callback is not called and back pressure will ensure that no more frames are parsed
+    // TODO are we sure that the API requires the input stream to be started on a partial frame?
     private final Deque<FrameCallbackBuffer> buffers = new ArrayDeque<>(2);
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private FrameCallbackBuffer activeFrame;

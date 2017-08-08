@@ -56,9 +56,10 @@ public class StringMessageSink implements MessageSink
                 ByteBuffer payload = frame.getPayload();
                 policy.assertValidTextMessageSize(size + payload.remaining());
                 size += payload.remaining();
-        
+
+                // TODO recycle string builders?
                 if (utf == null)
-                    utf = new Utf8StringBuilder(1024);
+                    utf = new Utf8StringBuilder((frame.isFin()?3:6)*payload.remaining()/2);
         
                 if (LOG.isDebugEnabled())
                     LOG.debug("Raw Payload {}", BufferUtil.toDetailString(payload));

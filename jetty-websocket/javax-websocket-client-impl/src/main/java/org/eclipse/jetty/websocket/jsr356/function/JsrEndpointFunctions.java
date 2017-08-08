@@ -404,7 +404,7 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
      *
      * @param endpoint the endpoint object
      */
-    @SuppressWarnings("Duplicates")
+    @Override
     protected void discoverAnnotatedEndpointFunctions(Object endpoint)
     {
         Class<?> endpointClass = endpoint.getClass();

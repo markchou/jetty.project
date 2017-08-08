@@ -749,6 +749,7 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
     {
         // No message sink is active
         if (activeMessageSink == null)
+            // TODO callback fail?
             return;
         
         // Accept the payload into the message sink
