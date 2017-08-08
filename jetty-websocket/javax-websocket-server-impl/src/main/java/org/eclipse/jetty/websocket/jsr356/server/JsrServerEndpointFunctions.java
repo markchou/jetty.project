@@ -33,23 +33,21 @@ import org.eclipse.jetty.websocket.jsr356.function.JsrEndpointFunctions;
 
 public class JsrServerEndpointFunctions extends JsrEndpointFunctions
 {
-    public JsrServerEndpointFunctions(Object endpoint, WebSocketPolicy policy, Executor executor,
+    public JsrServerEndpointFunctions(Class<?> endpointClass, WebSocketPolicy policy, Executor executor,
                                       AvailableEncoders encoders, AvailableDecoders decoders,
                                       Map<String, String> uriParams, EndpointConfig endpointConfig)
     {
-        super(endpoint, policy, executor, encoders, decoders, uriParams, endpointConfig);
+        super(endpointClass, policy, executor, encoders, decoders, uriParams, endpointConfig);
     }
     
     /**
      * Generic discovery of annotated endpoint functions.
      *
-     * @param endpoint the endpoint object
+     * @param endpointClass the endpoint class
      */
     @SuppressWarnings("Duplicates")
-    protected void discoverAnnotatedEndpointFunctions(Object endpoint)
+    protected void discoverAnnotatedEndpointFunctions(Class<?> endpointClass)
     {
-        Class<?> endpointClass = endpoint.getClass();
-        
         // Use the JSR/Server annotation
         ServerEndpoint websocket = endpointClass.getAnnotation(ServerEndpoint.class);
         
@@ -62,7 +60,7 @@ public class JsrServerEndpointFunctions extends JsrEndpointFunctions
             // both JSR356/Client and JSR356/Server endpoints
             try
             {
-                discoverJsrAnnotatedEndpointFunctions(endpoint);
+                discoverJsrAnnotatedEndpointFunctions(endpointClass);
                 return;
             }
             catch (DecodeException e)
@@ -72,7 +70,7 @@ public class JsrServerEndpointFunctions extends JsrEndpointFunctions
         }
         
         // Not a ServerEndpoint, let the ClientEndpoint test proceed
-        super.discoverAnnotatedEndpointFunctions(endpoint);
+        super.discoverAnnotatedEndpointFunctions(endpointClass);
     }
     
 }

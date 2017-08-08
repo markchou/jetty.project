@@ -36,7 +36,7 @@ public class JsrEndpointFunctions_BadSignaturesTest extends AbstractJsrEndpointF
     private void assertBadSocket(Object socket, String expectedString) throws Exception
     {
         JsrEndpointFunctions functions = new JsrEndpointFunctions(
-                socket,
+                socket.getClass(),
                 container.getPolicy(),
                 container.getExecutor(),
                 encoders,

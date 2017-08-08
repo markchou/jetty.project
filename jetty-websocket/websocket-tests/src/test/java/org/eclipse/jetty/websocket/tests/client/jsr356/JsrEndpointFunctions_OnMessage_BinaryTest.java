@@ -42,7 +42,7 @@ public class JsrEndpointFunctions_OnMessage_BinaryTest extends AbstractJsrEndpoi
     private void assertOnMessageInvocation(TrackingSocket socket, String expectedEventFormat, Object... args) throws Exception
     {
         JsrEndpointFunctions endpointFunctions = new JsrEndpointFunctions(
-                socket, container.getPolicy(),
+                socket.getClass(), container.getPolicy(),
                 container.getExecutor(),
                 encoders,
                 decoders,

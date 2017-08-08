@@ -66,7 +66,6 @@ import org.eclipse.jetty.websocket.api.extensions.IncomingFrames;
 import org.eclipse.jetty.websocket.api.extensions.OutgoingFrames;
 import org.eclipse.jetty.websocket.common.frames.CloseFrame;
 import org.eclipse.jetty.websocket.common.function.CommonEndpointFunctions;
-import org.eclipse.jetty.websocket.common.function.EndpointFunctions;
 import org.eclipse.jetty.websocket.common.io.AbstractWebSocketConnection;
 import org.eclipse.jetty.websocket.common.message.MessageSink;
 import org.eclipse.jetty.websocket.common.scopes.WebSocketContainerScope;
@@ -147,7 +146,8 @@ public class WebSocketSession extends ContainerLifeCycle implements Session, Rem
     
     public EndpointFunctions newEndpointFunctions(Object endpoint)
     {
-        return new CommonEndpointFunctions(endpoint, getPolicy(), this.executor);
+        // TODO: should probably start from existing/prior functions
+        return new CommonEndpointFunctions(endpoint.getClass(), getPolicy(), this.executor);
     }
     
     public void connect()
@@ -933,8 +933,6 @@ public class WebSocketSession extends ContainerLifeCycle implements Session, Rem
     @Override
     public SuspendToken suspend()
     {
-        // TODO: limit ability to suspend to only when websocket calls application ?
-
         return connection.suspend();
     }
     

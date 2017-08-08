@@ -16,21 +16,30 @@
 //  ========================================================================
 //
 
-package org.eclipse.jetty.websocket.common.reflect;
+package org.eclipse.jetty.websocket.jsr356;
 
-import org.eclipse.jetty.util.annotation.Name;
+import org.eclipse.jetty.websocket.common.invoke.InvokerUtils;
 
-/**
- * Arg Identifier based on jetty's {@link org.eclipse.jetty.util.annotation.Name} annotation.
- */
-public class NameArgIdentifier implements ArgIdentifier
+public class JsrParamIdentifier
 {
-    @Override
-    public Arg apply(Arg arg)
+    public static final InvokerUtils.ParamIdentifier INSTANCE;
+
+    static
     {
-        Name name = arg.getAnnotation(Name.class);
-        if (name != null)
-            arg.setTag(name.value());
-        return arg;
+        InvokerUtils.ParamIdentifier paramIdentifier;
+
+        try
+        {
+            Class<? extends InvokerUtils.ParamIdentifier> jsrServerIdentifierClass =
+                    (Class<? extends InvokerUtils.ParamIdentifier>)
+                            Class.forName("org.eclipse.jetty.websocket.jsr356.server.PathParamIdentifier");
+            paramIdentifier = jsrServerIdentifierClass.newInstance();
+        }
+        catch (Throwable t)
+        {
+            paramIdentifier = InvokerUtils.PARAM_IDENTITY;
+        }
+
+        INSTANCE = paramIdentifier;
     }
 }

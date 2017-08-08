@@ -18,8 +18,8 @@
 
 package org.eclipse.jetty.websocket.jsr356.function;
 
-import java.io.IOException;
-import java.lang.annotation.Annotation;
+import java.io.Reader;
+import java.lang.invoke.MethodHandle;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
@@ -27,14 +27,12 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.concurrent.Executor;
-import java.util.function.BiFunction;
 import java.util.function.Function;
 
 import javax.websocket.ClientEndpoint;
 import javax.websocket.CloseReason;
 import javax.websocket.DecodeException;
 import javax.websocket.Decoder;
-import javax.websocket.EncodeException;
 import javax.websocket.Encoder;
 import javax.websocket.Endpoint;
 import javax.websocket.EndpointConfig;
@@ -51,17 +49,19 @@ import org.eclipse.jetty.util.log.Log;
 import org.eclipse.jetty.util.log.Logger;
 import org.eclipse.jetty.websocket.api.FrameCallback;
 import org.eclipse.jetty.websocket.api.InvalidWebSocketException;
-import org.eclipse.jetty.websocket.api.WebSocketException;
 import org.eclipse.jetty.websocket.api.WebSocketPolicy;
 import org.eclipse.jetty.websocket.api.extensions.Frame;
 import org.eclipse.jetty.websocket.common.InvalidSignatureException;
 import org.eclipse.jetty.websocket.common.function.CommonEndpointFunctions;
+import org.eclipse.jetty.websocket.common.function.MethodHandleFunction;
+import org.eclipse.jetty.websocket.common.invoke.InvokerUtils;
 import org.eclipse.jetty.websocket.common.message.MessageSink;
+import org.eclipse.jetty.websocket.common.message.PartialBinaryMessage;
 import org.eclipse.jetty.websocket.common.message.PartialBinaryMessageSink;
+import org.eclipse.jetty.websocket.common.message.PartialTextMessage;
 import org.eclipse.jetty.websocket.common.message.PartialTextMessageSink;
-import org.eclipse.jetty.websocket.common.reflect.Arg;
-import org.eclipse.jetty.websocket.common.reflect.UnorderedSignature;
 import org.eclipse.jetty.websocket.common.util.ReflectUtils;
+import org.eclipse.jetty.websocket.jsr356.JsrParamIdentifier;
 import org.eclipse.jetty.websocket.jsr356.JsrPongMessage;
 import org.eclipse.jetty.websocket.jsr356.JsrSession;
 import org.eclipse.jetty.websocket.jsr356.decoders.AvailableDecoders;
@@ -126,11 +126,11 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     private final EndpointConfig endpointConfig;
     private Map<String, String> staticArgs;
     
-    public JsrEndpointFunctions(Object endpoint, WebSocketPolicy policy, Executor executor,
+    public JsrEndpointFunctions(Class endpointClass, WebSocketPolicy policy, Executor executor,
                                 AvailableEncoders encoders, AvailableDecoders decoders,
                                 Map<String, String> uriParams, EndpointConfig endpointConfig)
     {
-        super(endpoint, policy, executor);
+        super(endpointClass, policy, executor);
         this.encoders = encoders;
         this.decoders = decoders;
         this.endpointConfig = endpointConfig;
@@ -360,55 +360,45 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     }
     
     @Override
-    protected void discoverEndpointFunctions(Object endpoint)
+    protected void discoverEndpointFunctions(Class<?> endpointClass)
     {
-        if (endpoint instanceof Endpoint)
+        if (Endpoint.class.isAssignableFrom(endpointClass))
         {
-            Endpoint jsrEndpoint = (Endpoint) endpoint;
-            setOnOpen((session) ->
-                    {
-                        jsrEndpoint.onOpen(session, endpointConfig);
-                        return null;
-                    },
-                    ReflectUtils.findMethod(endpoint.getClass(), "onOpen", Session.class, EndpointConfig.class)
-            );
-            setOnClose((close) ->
-                    {
-                        CloseReason closeReason = new CloseReason(
-                                CloseReason.CloseCodes.getCloseCode(close.getStatusCode())
-                                , close.getReason());
-                        jsrEndpoint.onClose(getSession(), closeReason);
-                        return null;
-                    },
-                    ReflectUtils.findMethod(endpoint.getClass(), "onClose", Session.class, EndpointConfig.class)
-            );
-            setOnError((cause) ->
-                    {
-                        jsrEndpoint.onError(getSession(), cause);
-                        return null;
-                    },
-                    ReflectUtils.findMethod(endpoint.getClass(), "onError", Session.class, EndpointConfig.class)
-            );
-            
+            // Endpoint.onOpen()
+            Method onOpen = ReflectUtils.findMethod(endpointClass, "onOpen", javax.websocket.Session.class, javax.websocket.EndpointConfig.class);
+            setOnOpen(new MethodHandleFunction(javax.websocket.Session.class, onOpen), onOpen);
+
+            // Endpoint.onClose()
+            Method onClose = ReflectUtils.findMethod(endpointClass, "onClose", javax.websocket.Session.class, javax.websocket.CloseReason.class);
+            setOnClose(new MethodHandleFunction(javax.websocket.CloseReason.class, onClose), onClose);
+            // TODO: adapt CloseInfo -> CloseReason for handle
+            /* eg:
+             * CloseReason closeReason = new CloseReason(
+             *                  CloseReason.CloseCodes.getCloseCode(close.getStatusCode()),
+             *                  close.getReason());
+             */
+
+            // Endpoint.onError()
+            Method onError = ReflectUtils.findMethod(endpointClass, "onError", javax.websocket.Session.class, Throwable.class);
+            setOnError(new MethodHandleFunction(Throwable.class, onError), onError);
+
             // If using an Endpoint, there's nothing else left to map at this point.
             // Eventually, the endpoint should call .addMessageHandler() to declare
             // the various TEXT / BINARY / PONG message functions
             return;
         }
         
-        discoverAnnotatedEndpointFunctions(endpoint);
+        discoverAnnotatedEndpointFunctions(endpointClass);
     }
     
     /**
      * Generic discovery of annotated endpoint functions.
      *
-     * @param endpoint the endpoint object
+     * @param endpointClass the endpoint object
      */
     @SuppressWarnings("Duplicates")
-    protected void discoverAnnotatedEndpointFunctions(Object endpoint)
+    protected void discoverAnnotatedEndpointFunctions(Class<?> endpointClass)
     {
-        Class<?> endpointClass = endpoint.getClass();
-        
         // Use the JSR/Client annotation
         ClientEndpoint websocket = endpointClass.getAnnotation(ClientEndpoint.class);
         
@@ -421,7 +411,7 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
             // both JSR356/Client and JSR356/Server endpoints
             try
             {
-                discoverJsrAnnotatedEndpointFunctions(endpoint);
+                discoverJsrAnnotatedEndpointFunctions(endpointClass);
             }
             catch (DecodeException e)
             {
@@ -433,43 +423,28 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     /**
      * JSR356 Specific discovery of Annotated Endpoint Methods
      *
-     * @param endpoint the endpoint
+     * @param endpointClass the endpoint object
      */
-    protected void discoverJsrAnnotatedEndpointFunctions(Object endpoint) throws DecodeException
+    protected void discoverJsrAnnotatedEndpointFunctions(Class<?> endpointClass) throws DecodeException
     {
-        Class<?> endpointClass = endpoint.getClass();
         Method method;
-        Arg SESSION = new Arg(Session.class);
-        
+
         // OnOpen [0..1]
         method = ReflectUtils.findAnnotatedMethod(endpointClass, OnOpen.class);
         if (method != null)
         {
             ReflectUtils.assertIsPublicNonStatic(method);
-            ReflectUtils.assertIsReturn(method, Void.TYPE);
-    
-            Arg ENDPOINT_CONFIG = new Arg(EndpointConfig.class);
-            
+            ReflectUtils.assertIsReturn(method, Void.TYPE); // must have no return
+
+            InvokerUtils.Arg callingArgs[] = createCallArgs(
+                    new InvokerUtils.Arg(javax.websocket.Session.class),
+                    new InvokerUtils.Arg(javax.websocket.EndpointConfig.class));
+
+            // TODO: endpointConfig is static at this point, we could make that a static arg
+
             // Analyze @OnOpen method declaration techniques
-            UnorderedSignature sigOpen = new UnorderedSignature(
-                    createCallArgs(SESSION, ENDPOINT_CONFIG));
-            
-            int argMapping[] = sigOpen.getArgMapping(method, true);
-            if(argMapping != null)
-            {
-                assertSignatureValid(sigOpen, OnOpen.class, method);
-    
-                final Object[] args = newFunctionArgs(sigOpen.getCallArgs(), method, argMapping);
-                BiFunction<Object, Object[], Object> invoker = sigOpen.newFunction(method);
-    
-                setOnOpen((jsrSession) ->
-                {
-                    args[0] = jsrSession;
-                    args[1] = endpointConfig;
-                    invoker.apply(endpoint, args);
-                    return null;
-                }, method);
-            }
+            MethodHandle onOpenHandle = InvokerUtils.mutatedInvoker(endpointClass, method, JsrParamIdentifier.INSTANCE, callingArgs);
+            setOnOpen(new MethodHandleFunction(JsrSession.class, onOpenHandle), method);
         }
         
         // OnClose [0..1]
@@ -477,33 +452,16 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
         if (method != null)
         {
             ReflectUtils.assertIsPublicNonStatic(method);
-            ReflectUtils.assertIsReturn(method, Void.TYPE);
-            
-            Arg CLOSE_REASON = new Arg(CloseReason.class);
+            ReflectUtils.assertIsReturn(method, Void.TYPE); // must have no return
+
+            InvokerUtils.Arg callingArgs[] = createCallArgs(
+                    new InvokerUtils.Arg(javax.websocket.Session.class),
+                    new InvokerUtils.Arg(javax.websocket.CloseReason.class));
             
             // Analyze @OnClose method declaration techniques
-            UnorderedSignature sigClose = new UnorderedSignature(
-                    createCallArgs(SESSION, CLOSE_REASON));
-            
-            int argMapping[] = sigClose.getArgMapping(method, true);
-            if(argMapping != null)
-            {
-                assertSignatureValid(sigClose, OnClose.class, method);
-    
-                final Object[] args = newFunctionArgs(sigClose.getCallArgs(), method, argMapping);
-                BiFunction<Object, Object[], Object> invoker = sigClose.newFunction(method);
-                
-                setOnClose((closeInfo) ->
-                {
-                    // Convert Jetty CloseInfo to JSR CloseReason
-                    CloseReason.CloseCode closeCode = CloseReason.CloseCodes.getCloseCode(closeInfo.getStatusCode());
-                    CloseReason closeReason = new CloseReason(closeCode, closeInfo.getReason());
-                    args[0] = getSession();
-                    args[1] = closeReason;
-                    invoker.apply(endpoint, args);
-                    return null;
-                }, method);
-            }
+            MethodHandle onCloseHandle = InvokerUtils.mutatedInvoker(endpointClass, method, JsrParamIdentifier.INSTANCE, callingArgs);
+            setOnClose(new MethodHandleFunction(CloseReason.class, onCloseHandle), method);
+            // TODO: adapt CloseInfo (jetty) -> CloseReason (jsr)
         }
         
         // OnError [0..1]
@@ -511,29 +469,15 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
         if (method != null)
         {
             ReflectUtils.assertIsPublicNonStatic(method);
-            ReflectUtils.assertIsReturn(method, Void.TYPE);
-            
-            Arg CAUSE = new Arg(Throwable.class);
-            
+            ReflectUtils.assertIsReturn(method, Void.TYPE); // must have no return
+
+            InvokerUtils.Arg callingArgs[] = createCallArgs(
+                    new InvokerUtils.Arg(javax.websocket.Session.class),
+                    new InvokerUtils.Arg(Throwable.class));
+
             // Analyze @OnError method declaration techniques
-            UnorderedSignature sigError = new UnorderedSignature(
-                   createCallArgs(SESSION, CAUSE));
-            
-            int argMapping[] = sigError.getArgMapping(method, true);
-            if(argMapping != null)
-            {
-                assertSignatureValid(sigError, OnError.class, method);
-    
-                final Object[] args = newFunctionArgs(sigError.getCallArgs(), method, argMapping);
-                BiFunction<Object, Object[], Object> invoker = sigError.newFunction(method);
-                setOnError((cause) ->
-                {
-                    args[0] = getSession();
-                    args[1] = cause;
-                    invoker.apply(endpoint, args);
-                    return null;
-                }, method);
-            }
+            MethodHandle onErrorHandle = InvokerUtils.mutatedInvoker(endpointClass, method, JsrParamIdentifier.INSTANCE, callingArgs);
+            setOnError(new MethodHandleFunction(Throwable.class, onErrorHandle), method);
         }
         
         // OnMessage [0..3] (TEXT / BINARY / PONG)
@@ -561,50 +505,32 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
                 // If we reached this point, then we have a @OnMessage annotated method
                 // that doesn't match any known signature above.
                 
-                throw InvalidSignatureException.build(endpoint.getClass(), OnMessage.class, onMsg);
+                throw InvalidSignatureException.build(endpointClass, OnMessage.class, onMsg);
             }
         }
     }
     
     private boolean discoverOnMessagePong(Method onMsg) throws DecodeException
     {
-        Arg SESSION = new Arg(Session.class);
-        UnorderedSignature sigPong = new UnorderedSignature(createCallArgs(SESSION, new Arg(PongMessage.class).required()));
-        int argMapping[] = sigPong.getArgMapping(onMsg);
-        if (argMapping != null)
+        InvokerUtils.Arg callingArgs[] = createCallArgs(
+                new InvokerUtils.Arg(Session.class),
+                new InvokerUtils.Arg(PongMessage.class)
+        );
+
+        MethodHandle methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, JsrParamIdentifier.INSTANCE, callingArgs);
+        if(methodHandle != null)
         {
             assertOnMessageSignature(onMsg);
-            
-            final Object[] args = newFunctionArgs(sigPong.getCallArgs(), onMsg, argMapping);
-            BiFunction<Object, Object[], Object> invoker = sigPong.newFunction(onMsg);
+
+            /* TODO: need return handling
+             * Object ret = invoker.apply(endpoint, args);
+             * getSession().getBasicRemote().sendObject(ret);
+             */
+
             // No decoder for PongMessage
-            setOnPong((pong) ->
-            {
-                args[0] = getSession();
-                args[1] = new JsrPongMessage(pong);
-                Object ret = invoker.apply(endpoint, args);
-                if (ret != null)
-                {
-                    try
-                    {
-                        getSession().getBasicRemote().sendObject(ret);
-                    }
-                    catch (EncodeException | IOException e)
-                    {
-                        throw new WebSocketException(e);
-                    }
-                }
-                return null;
-            }, onMsg);
-            OnMessage annotation = onMsg.getAnnotation(OnMessage.class);
-            if (annotation.maxMessageSize() > 0)
-            {
-                StringBuilder err = new StringBuilder();
-                err.append("@OnMessage.maxMessageSize=").append(annotation.maxMessageSize());
-                err.append(" not valid for PongMesssage types: ");
-                ReflectUtils.append(err, onMsg);
-                LOG.warn(err.toString());
-            }
+            setOnPong(new MethodHandleFunction(ByteBuffer.class, methodHandle), onMsg);
+
+            warnOnMaxMessageSizeUse(onMsg, "PongMessage methods");
             return true;
         }
         return false;
@@ -612,39 +538,30 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     
     private boolean discoverOnMessageBinaryStream(Method onMsg) throws DecodeException
     {
-        Arg SESSION = new Arg(Session.class);
+        InvokerUtils.Arg callingArgs[] = createCallArgs(
+                new InvokerUtils.Arg(Session.class),
+                new InvokerUtils.Arg(Decoder.BinaryStream.class)
+        );
+
         for (AvailableDecoders.RegisteredDecoder decoder : decoders.supporting(Decoder.BinaryStream.class))
         {
-            UnorderedSignature sig = new UnorderedSignature(createCallArgs(SESSION, new Arg(decoder.objectType).required()));
-            int argMapping[] = sig.getArgMapping(onMsg);
-            if (argMapping != null)
+            callingArgs[1] = new InvokerUtils.Arg(decoder.objectType).required();
+
+            MethodHandle methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, JsrParamIdentifier.INSTANCE, callingArgs);
+            if(methodHandle != null)
             {
                 assertOnMessageSignature(onMsg);
                 
-                final Object[] args = newFunctionArgs(sig.getCallArgs(), onMsg, argMapping);
-                BiFunction<Object, Object[], Object> invoker = sig.newFunction(onMsg);
                 Decoder.BinaryStream decoderInstance = decoders.getInstanceOf(decoder);
                 DecodedInputStreamMessageSink streamSink = new DecodedInputStreamMessageSink(
                         this,
                         getExecutor(),
                         decoderInstance,
-                        (msg) ->
-                        {
-                            args[0] = getSession();
-                            args[1] = msg;
-                            return invoker.apply(endpoint, args);
-                        }
-                );
+                        new MethodHandleFunction(decoder.objectType, methodHandle)
+                        );
                 setOnBinary(streamSink, onMsg);
-                OnMessage annotation = onMsg.getAnnotation(OnMessage.class);
-                if (annotation.maxMessageSize() > 0)
-                {
-                    StringBuilder err = new StringBuilder();
-                    err.append("@OnMessage.maxMessageSize=").append(annotation.maxMessageSize());
-                    err.append(" not valid for Streaming Binary types: ");
-                    ReflectUtils.append(err, onMsg);
-                    LOG.warn(err.toString());
-                }
+
+                warnOnMaxMessageSizeUse(onMsg, "Streaming Binary methods");
                 return true;
             }
         }
@@ -653,39 +570,30 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     
     private boolean discoverOnMessageTextStream(Method onMsg) throws DecodeException
     {
-        Arg SESSION = new Arg(Session.class);
+        InvokerUtils.Arg callingArgs[] = createCallArgs(
+                new InvokerUtils.Arg(Session.class),
+                new InvokerUtils.Arg(Decoder.TextStream.class)
+        );
+
         for (AvailableDecoders.RegisteredDecoder decoder : decoders.supporting(Decoder.TextStream.class))
         {
-            UnorderedSignature sig = new UnorderedSignature(createCallArgs(SESSION, new Arg(decoder.objectType).required()));
-            int argMapping[] = sig.getArgMapping(onMsg);
-            if (argMapping != null)
+            callingArgs[1] = new InvokerUtils.Arg(decoder.objectType).required();
+
+            MethodHandle methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, JsrParamIdentifier.INSTANCE, callingArgs);
+            if(methodHandle != null)
             {
                 assertOnMessageSignature(onMsg);
                 
-                final Object[] args = newFunctionArgs(sig.getCallArgs(), onMsg, argMapping);
-                BiFunction<Object, Object[], Object> invoker = sig.newFunction(onMsg);
                 Decoder.TextStream decoderInstance = decoders.getInstanceOf(decoder);
                 DecodedReaderMessageSink streamSink = new DecodedReaderMessageSink(
                         this,
                         getExecutor(),
                         decoderInstance,
-                        (msg) ->
-                        {
-                            args[0] = getSession();
-                            args[1] = msg;
-                            return invoker.apply(endpoint, args);
-                        }
-                );
+                        new MethodHandleFunction(Reader.class, methodHandle)
+                        );
                 setOnText(streamSink, onMsg);
-                OnMessage annotation = onMsg.getAnnotation(OnMessage.class);
-                if (annotation.maxMessageSize() > 0)
-                {
-                    StringBuilder err = new StringBuilder();
-                    err.append("@OnMessage.maxMessageSize=").append(annotation.maxMessageSize());
-                    err.append(" not valid for Streaming Text types: ");
-                    ReflectUtils.append(err, onMsg);
-                    LOG.warn(err.toString());
-                }
+
+                warnOnMaxMessageSizeUse(onMsg, "Streaming Text methods");
                 return true;
             }
         }
@@ -695,36 +603,23 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     @SuppressWarnings("Duplicates")
     private boolean discoverOnMessagePartialBinaryBuffer(Method onMsg) throws DecodeException
     {
-        Arg SESSION = new Arg(Session.class);
-        Arg ARG_BYTE_BUFFER = new Arg(ByteBuffer.class).required();
-        Arg ARG_PARTIAL_BOOL = new Arg(boolean.class).required();
-        UnorderedSignature sigPartialByteBuffer = new UnorderedSignature(createCallArgs(SESSION, ARG_BYTE_BUFFER, ARG_PARTIAL_BOOL));
-        int argMapping[] = sigPartialByteBuffer.getArgMapping(onMsg);
-        if (argMapping != null)
+        InvokerUtils.Arg callingArgs[] = createCallArgs(
+                new InvokerUtils.Arg(Session.class), // The Session
+                new InvokerUtils.Arg(ByteBuffer.class).required(), // the partial BINARY message
+                new InvokerUtils.Arg(boolean.class).required() // the partial/fin flag
+        );
+
+        // No decoders for Partial messages per JSR-356 (PFD1 spec)
+
+        MethodHandle methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, JsrParamIdentifier.INSTANCE, callingArgs);
+        if(methodHandle != null)
         {
             // Found partial binary array args
             assertOnMessageSignature(onMsg);
             
-            final Object[] args = newFunctionArgs(sigPartialByteBuffer.getCallArgs(), onMsg, argMapping);
-            BiFunction<Object, Object[], Object> invoker = sigPartialByteBuffer.newFunction(onMsg);
-            // No decoders for Partial messages per JSR-356 (PFD1 spec)
-            setOnBinary(new PartialBinaryMessageSink((partial) ->
-            {
-                args[0] = getSession();
-                args[1] = partial.getPayload();
-                args[2] = partial.isFin();
-                invoker.apply(endpoint, args);
-                return null;
-            }), onMsg);
-            OnMessage annotation = onMsg.getAnnotation(OnMessage.class);
-            if (annotation.maxMessageSize() > 0)
-            {
-                StringBuilder err = new StringBuilder();
-                err.append("@OnMessage.maxMessageSize=").append(annotation.maxMessageSize());
-                err.append(" not valid for Partial Binary Buffer types: ");
-                ReflectUtils.append(err, onMsg);
-                LOG.warn(err.toString());
-            }
+            setOnBinary(new PartialBinaryMessageSink(new MethodHandleFunction<>(PartialBinaryMessage.class, methodHandle)), onMsg);
+
+            warnOnMaxMessageSizeUse(onMsg, "Partial Binary methods");
             return true;
         }
         return false;
@@ -732,36 +627,23 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     
     private boolean discoverOnMessagePartialBinaryArray(Method onMsg) throws DecodeException
     {
-        Arg SESSION = new Arg(Session.class);
-        Arg ARG_BYTE_ARRAY = new Arg(byte[].class).required();
-        Arg ARG_PARTIAL_BOOL = new Arg(boolean.class).required();
-        UnorderedSignature sigPartialBinaryArray = new UnorderedSignature(createCallArgs(SESSION, ARG_BYTE_ARRAY, ARG_PARTIAL_BOOL));
-        int argMapping[] = sigPartialBinaryArray.getArgMapping(onMsg);
-        if (argMapping != null)
+        InvokerUtils.Arg callingArgs[] = createCallArgs(
+                new InvokerUtils.Arg(Session.class), // The Session
+                new InvokerUtils.Arg(byte[].class).required(), // the partial BINARY message
+                new InvokerUtils.Arg(boolean.class).required() // the partial/fin flag
+        );
+
+        // No decoders for Partial messages per JSR-356 (PFD1 spec)
+
+        MethodHandle methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, JsrParamIdentifier.INSTANCE, callingArgs);
+        if(methodHandle != null)
         {
             // Found partial binary array args
             assertOnMessageSignature(onMsg);
             
-            final Object[] args = newFunctionArgs(sigPartialBinaryArray.getCallArgs(), onMsg, argMapping);
-            BiFunction<Object, Object[], Object> invoker = sigPartialBinaryArray.newFunction(onMsg);
-            // No decoders for Partial messages per JSR-356 (PFD1 spec)
-            setOnBinary(new PartialBinaryMessageSink((partial) ->
-            {
-                args[0] = getSession();
-                args[1] = BufferUtil.toArray(partial.getPayload());
-                args[2] = partial.isFin();
-                invoker.apply(endpoint, args);
-                return null;
-            }), onMsg);
-            OnMessage annotation = onMsg.getAnnotation(OnMessage.class);
-            if (annotation.maxMessageSize() > 0)
-            {
-                StringBuilder err = new StringBuilder();
-                err.append("@OnMessage.maxMessageSize=").append(annotation.maxMessageSize());
-                err.append(" not valid for Partial Binary Array types: ");
-                ReflectUtils.append(err, onMsg);
-                LOG.warn(err.toString());
-            }
+            setOnBinary(new PartialBinaryMessageSink(new MethodHandleFunction(PartialBinaryMessage.class, methodHandle)), onMsg);
+
+            warnOnMaxMessageSizeUse(onMsg, "Partial Binary methods");
             return true;
         }
         return false;
@@ -770,37 +652,23 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     @SuppressWarnings("Duplicates")
     private boolean discoverOnMessagePartialText(Method onMsg) throws DecodeException
     {
-        Arg SESSION = new Arg(Session.class);
-        Arg ARG_PARTIAL_BOOL = new Arg(boolean.class).required();
-        Arg ARG_STRING = new Arg(String.class).required();
-        UnorderedSignature sigPartialText = new UnorderedSignature(createCallArgs(SESSION, ARG_STRING, ARG_PARTIAL_BOOL));
+        InvokerUtils.Arg callingArgs[] = createCallArgs(
+                new InvokerUtils.Arg(Session.class), // The Session
+                new InvokerUtils.Arg(String.class).required(), // the partial TEXT message
+                new InvokerUtils.Arg(boolean.class).required() // the partial/fin flag
+        );
 
-        int argMapping[] = sigPartialText.getArgMapping(onMsg);
-        if (argMapping != null)
+        // No decoders for Partial messages per JSR-356 (PFD1 spec)
+
+        MethodHandle methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, JsrParamIdentifier.INSTANCE, callingArgs);
+        if(methodHandle != null)
         {
             // Found partial text args
             assertOnMessageSignature(onMsg);
-    
-            final Object[] args = newFunctionArgs(sigPartialText.getCallArgs(), onMsg, argMapping);
-            BiFunction<Object, Object[], Object> invoker = sigPartialText.newFunction(onMsg);
-            // No decoders for Partial messages per JSR-356 (PFD1 spec)
-            setOnText(new PartialTextMessageSink((partial) ->
-            {
-                args[0] = getSession();
-                args[1] = partial.getPayload();
-                args[2] = partial.isFin();
-                invoker.apply(endpoint, args);
-                return null;
-            }), onMsg);
-            OnMessage annotation = onMsg.getAnnotation(OnMessage.class);
-            if (annotation.maxMessageSize() > 0)
-            {
-                StringBuilder err = new StringBuilder();
-                err.append("@OnMessage.maxMessageSize=").append(annotation.maxMessageSize());
-                err.append(" not valid for Partial Text types: ");
-                ReflectUtils.append(err, onMsg);
-                LOG.warn(err.toString());
-            }
+
+            setOnText(new PartialTextMessageSink(new MethodHandleFunction(PartialTextMessage.class, methodHandle)), onMsg);
+
+            warnOnMaxMessageSizeUse(onMsg, "Partial Text methods");
             return true;
         }
         return false;
@@ -808,28 +676,26 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     
     private boolean discoverOnMessageWholeBinary(Method onMsg) throws DecodeException
     {
-        Arg SESSION = new Arg(Session.class);
+        InvokerUtils.Arg callingArgs[] = createCallArgs(
+                new InvokerUtils.Arg(Session.class),
+                new InvokerUtils.Arg(Decoder.Binary.class)
+        );
+
         for (AvailableDecoders.RegisteredDecoder decoder : decoders.supporting(Decoder.Binary.class))
         {
-            UnorderedSignature sig = new UnorderedSignature(createCallArgs(SESSION, new Arg(decoder.objectType).required()));
-            int argMapping[] = sig.getArgMapping(onMsg);
-            if (argMapping != null)
+            callingArgs[1] = new InvokerUtils.Arg(decoder.objectType).required();
+
+            MethodHandle methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, JsrParamIdentifier.INSTANCE, callingArgs);
+            if(methodHandle != null)
             {
                 assertOnMessageSignature(onMsg);
-                
-                final Object[] args = newFunctionArgs(sig.getCallArgs(), onMsg, argMapping);
-                BiFunction<Object, Object[], Object> invoker = sig.newFunction(onMsg);
+
                 Decoder.Binary decoderInstance = decoders.getInstanceOf(decoder);
                 DecodedBinaryMessageSink binarySink = new DecodedBinaryMessageSink(
                         policy,
                         this,
                         decoderInstance,
-                        (msg) ->
-                        {
-                            args[0] = getSession();
-                            args[1] = msg;
-                            return invoker.apply(endpoint, args);
-                        }
+                        new MethodHandleFunction(ByteBuffer.class, methodHandle)
                 );
                 setOnBinary(binarySink, onMsg);
                 OnMessage annotation = onMsg.getAnnotation(OnMessage.class);
@@ -845,28 +711,26 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
     
     private boolean discoverOnMessageWholeText(Method onMsg) throws DecodeException
     {
-        Arg SESSION = new Arg(Session.class);
+        InvokerUtils.Arg callingArgs[] = createCallArgs(
+                new InvokerUtils.Arg(Session.class),
+                new InvokerUtils.Arg(Decoder.Text.class)
+        );
+
         for (AvailableDecoders.RegisteredDecoder decoder : decoders.supporting(Decoder.Text.class))
         {
-            UnorderedSignature sig = new UnorderedSignature(createCallArgs(SESSION, new Arg(decoder.objectType).required()));
-            int argMapping[] = sig.getArgMapping(onMsg);
-            if (argMapping != null)
+            callingArgs[1] = new InvokerUtils.Arg(decoder.objectType).required();
+
+            MethodHandle methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, JsrParamIdentifier.INSTANCE, callingArgs);
+            if(methodHandle != null)
             {
                 assertOnMessageSignature(onMsg);
 
-                final Object[] args = newFunctionArgs(sig.getCallArgs(), onMsg, argMapping);
-                BiFunction<Object, Object[], Object> invoker = sig.newFunction(onMsg);
                 Decoder.Text decoderInstance = decoders.getInstanceOf(decoder);
                 DecodedTextMessageSink textSink = new DecodedTextMessageSink(
                         policy,
                         this,
                         decoderInstance,
-                        (msg) ->
-                        {
-                            args[0] = getSession();
-                            args[1] = msg;
-                            return invoker.apply(endpoint, args);
-                        }
+                        new MethodHandleFunction(String.class, methodHandle)
                 );
                 setOnText(textSink, onMsg);
                 OnMessage annotation = onMsg.getAnnotation(OnMessage.class);
@@ -879,19 +743,21 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
         }
         return false;
     }
-    
-    private void assertSignatureValid(UnorderedSignature sig, Class<? extends Annotation> annotationClass, Method method)
+
+    private void warnOnMaxMessageSizeUse(Method method, String scope)
     {
-        if (sig != null)
-            return;
-        
-        StringBuilder err = new StringBuilder();
-        err.append('@').append(annotationClass.getSimpleName());
-        err.append(' ');
-        ReflectUtils.append(err, endpoint.getClass(), method);
-        throw new InvalidSignatureException(err.toString());
+        // Warn when maxMessageSize has been set for partial support
+        OnMessage annotation = method.getAnnotation(OnMessage.class);
+        if (annotation.maxMessageSize() > 0)
+        {
+            StringBuilder err = new StringBuilder();
+            err.append("@OnMessage.maxMessageSize=").append(annotation.maxMessageSize());
+            err.append(" ignored for ").append(scope).append(": ");
+            ReflectUtils.append(err, method);
+            LOG.warn(err.toString());
+        }
     }
-    
+
     private void assertOnMessageSignature(Method method)
     {
         // Test modifiers
@@ -900,7 +766,7 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
         {
             StringBuilder err = new StringBuilder();
             err.append("@OnMessage method must be public: ");
-            ReflectUtils.append(err, endpoint.getClass(), method);
+            ReflectUtils.append(err, endpointClass, method);
             throw new InvalidSignatureException(err.toString());
         }
         
@@ -908,7 +774,7 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
         {
             StringBuilder err = new StringBuilder();
             err.append("@OnMessage method must NOT be static: ");
-            ReflectUtils.append(err, endpoint.getClass(), method);
+            ReflectUtils.append(err, endpointClass, method);
             throw new InvalidSignatureException(err.toString());
         }
         
@@ -926,53 +792,74 @@ public class JsrEndpointFunctions extends CommonEndpointFunctions<JsrSession>
         {
             StringBuilder err = new StringBuilder();
             err.append("@OnMessage return type invalid (no valid encoder found): ");
-            ReflectUtils.append(err, endpoint.getClass(), method);
+            ReflectUtils.append(err, endpointClass, method);
             throw new InvalidSignatureException(err.toString());
         }
     }
-    
-    private Object[] newFunctionArgs(Arg[] callArgs, Method destMethod, int argMapping[]) throws DecodeException
+
+//    TODO
+//    private Object[] newFunctionArgs(Arg[] callArgs, Method destMethod, int argMapping[]) throws DecodeException
+//    {
+//        Object[] potentialArgs = new Object[callArgs.length];
+//
+//        if ((staticArgs == null) || (staticArgs.isEmpty()))
+//        {
+//            // No static args, then potentialArgs is empty too
+//            return potentialArgs;
+//        }
+//
+//        Class<?>[] paramTypes = destMethod.getParameterTypes();
+//        int paramTypesLen = paramTypes.length;
+//
+//        for (int i = 0; i < paramTypesLen; i++)
+//        {
+//            Class destType = paramTypes[i];
+//            Arg callArg = callArgs[argMapping[i]];
+//            String staticRawValue = staticArgs.get(callArg.getTag());
+//            TODO: potentialArgs[argMapping[i]] = AvailableDecoders.decodePrimitive(staticRawValue, destType);
+//
+//        }
+//        return potentialArgs;
+//    }
+
+    /**
+     * Create the calling args array, complete with entries for all of the identified static args
+     * that can arrive from named URI-Template variables.
+     * <p>
+     *     Each calling arg from a URI-Template variable is called via the String type.
+     *     The conversion to the method parameter type is done in a different step.
+     * </p>
+     *
+     * @param args the known calling args that exist, regardless if URI-Template variables exist or not.
+     * @return the list of Calling Args
+     */
+    private InvokerUtils.Arg[] createCallArgs(InvokerUtils.Arg... args)
     {
-        Object[] potentialArgs = new Object[callArgs.length];
-    
-        if ((staticArgs == null) || (staticArgs.isEmpty()))
-        {
-            // No static args, then potentialArgs is empty too
-            return potentialArgs;
-        }
-        
-        Class<?>[] paramTypes = destMethod.getParameterTypes();
-        int paramTypesLen = paramTypes.length;
-        
-        for (int i = 0; i < paramTypesLen; i++)
-        {
-            Class destType = paramTypes[i];
-            Arg callArg = callArgs[argMapping[i]];
-            String staticRawValue = staticArgs.get(callArg.getTag());
-            potentialArgs[argMapping[i]] = AvailableDecoders.decodePrimitive(staticRawValue, destType);
-            
-        }
-        return potentialArgs;
-    }
-    
-    private Arg[] createCallArgs(Arg... args)
-    {
+        /* TODO: this could be smarter by looking at the parameter types on the destination method too
+         * Optionally even performing a CallingArg -> Decoder -> ParameterType conversion?
+         */
+
+        /* It might be tempting to have MethodHandle have static callingArgs for the PathParam entries at this point.
+         * However, the values for these static PathParam entries are not known until upgrade time,
+         * as that is when the values are passed into the environment via the submitted request URI.
+         */
+
         int argCount = args.length;
         if (this.staticArgs != null)
             argCount += this.staticArgs.size();
-        
-        Arg callArgs[] = new Arg[argCount];
+
+        InvokerUtils.Arg callArgs[] = new InvokerUtils.Arg[argCount];
         int idx = 0;
-        for (Arg arg : args)
+        for (InvokerUtils.Arg arg : args)
         {
             callArgs[idx++] = arg;
         }
-        
+
         if (this.staticArgs != null)
         {
             for (Map.Entry<String, String> entry : staticArgs.entrySet())
             {
-                callArgs[idx++] = new Arg(entry.getValue().getClass()).setTag(entry.getKey());
+                callArgs[idx++] = new InvokerUtils.Arg(entry.getValue().getClass(), entry.getKey());
             }
         }
         return callArgs;

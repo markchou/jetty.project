@@ -536,8 +536,6 @@ public class ReflectUtils
             }
         }
         str.append(')');
-        
-        // TODO: show exceptions?
     }
 
     public static void append(StringBuilder str, Method method)

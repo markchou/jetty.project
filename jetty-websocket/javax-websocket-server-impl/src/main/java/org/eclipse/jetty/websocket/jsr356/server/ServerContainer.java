@@ -42,7 +42,7 @@ import org.eclipse.jetty.util.log.Log;
 import org.eclipse.jetty.util.log.Logger;
 import org.eclipse.jetty.websocket.api.WebSocketPolicy;
 import org.eclipse.jetty.websocket.common.WebSocketSession;
-import org.eclipse.jetty.websocket.common.function.EndpointFunctions;
+import org.eclipse.jetty.websocket.common.EndpointFunctions;
 import org.eclipse.jetty.websocket.jsr356.ClientContainer;
 import org.eclipse.jetty.websocket.jsr356.JsrSessionFactory;
 import org.eclipse.jetty.websocket.jsr356.decoders.AvailableDecoders;
@@ -258,7 +258,8 @@ public class ServerContainer extends ClientContainer implements javax.websocket.
                                                     Map<String, String> pathParameters,
                                                     EndpointConfig config)
     {
-        return new JsrServerEndpointFunctions(endpoint,
+        // TODO: should probably start from existing/prior functions
+        return new JsrServerEndpointFunctions(endpoint.getClass(),
                 sessionPolicy,
                 getExecutor(),
                 availableEncoders,

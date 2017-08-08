@@ -38,7 +38,7 @@ public class JsrEndpointFunctions_OnErrorTest extends AbstractJsrEndpointFunctio
     private void assertOnErrorInvocation(TrackingSocket socket, String expectedEventFormat, Object... args) throws Exception
     {
         JsrEndpointFunctions endpointFunctions = new JsrEndpointFunctions(
-                socket, container.getPolicy(),
+                socket.getClass(), container.getPolicy(),
                 container.getExecutor(),
                 encoders,
                 decoders,

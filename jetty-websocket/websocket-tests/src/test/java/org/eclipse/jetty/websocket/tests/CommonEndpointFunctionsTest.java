@@ -73,12 +73,20 @@ public class CommonEndpointFunctionsTest
 
     @Rule
     public TestName testname = new TestName();
-    
+
+    // TODO: should probably remove this as its role is now different
+    @Deprecated
     private class CloseableEndpointFunctions extends CommonEndpointFunctions implements AutoCloseable
     {
         public CloseableEndpointFunctions(Object endpoint, WebSocketContainerScope containerScope) throws Exception
         {
-            super(endpoint, containerScope.getPolicy(), containerScope.getExecutor());
+            super(endpoint.getClass(), containerScope.getPolicy(), containerScope.getExecutor());
+            start();
+        }
+
+        public CloseableEndpointFunctions(Class<?> endpointClass, WebSocketContainerScope containerScope) throws Exception
+        {
+            super(endpointClass, containerScope.getPolicy(), containerScope.getExecutor());
             start();
         }
     

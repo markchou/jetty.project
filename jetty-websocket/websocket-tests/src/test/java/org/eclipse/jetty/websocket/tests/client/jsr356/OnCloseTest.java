@@ -118,7 +118,7 @@ public class OnCloseTest
         AvailableDecoders decoders = new AvailableDecoders(config);
         Map<String, String> uriParams = new HashMap<>();
         
-        JsrEndpointFunctions jsrFunctions = new JsrEndpointFunctions(endpoint, policy,
+        JsrEndpointFunctions jsrFunctions = new JsrEndpointFunctions(endpoint.getClass(), policy,
                 executor, encoders, decoders, uriParams, config);
         try
         {

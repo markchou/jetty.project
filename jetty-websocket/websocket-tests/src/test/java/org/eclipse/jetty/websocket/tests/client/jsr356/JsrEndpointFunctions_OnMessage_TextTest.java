@@ -43,7 +43,7 @@ public class JsrEndpointFunctions_OnMessage_TextTest extends AbstractJsrEndpoint
     private void onText(TrackingSocket socket, String msg) throws Exception
     {
         JsrEndpointFunctions endpointFunctions = new JsrEndpointFunctions(
-                socket, container.getPolicy(),
+                socket.getClass(), container.getPolicy(),
                 container.getExecutor(),
                 encoders,
                 decoders,

@@ -21,12 +21,12 @@ package org.eclipse.jetty.websocket.common.function;
 import java.io.InputStream;
 import java.io.Reader;
 import java.lang.annotation.Annotation;
+import java.lang.invoke.MethodHandle;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.concurrent.Executor;
-import java.util.function.BiFunction;
 import java.util.function.Function;
 
 import org.eclipse.jetty.util.BufferUtil;
@@ -51,19 +51,19 @@ import org.eclipse.jetty.websocket.api.annotations.OnWebSocketMessage;
 import org.eclipse.jetty.websocket.api.annotations.WebSocket;
 import org.eclipse.jetty.websocket.api.extensions.Frame;
 import org.eclipse.jetty.websocket.common.CloseInfo;
+import org.eclipse.jetty.websocket.common.EndpointFunctions;
 import org.eclipse.jetty.websocket.common.InvalidSignatureException;
-import org.eclipse.jetty.websocket.common.ManagedEndpoint;
-import org.eclipse.jetty.websocket.common.frames.ReadOnlyDelegatedFrame;
+import org.eclipse.jetty.websocket.common.invoke.InvokerUtils;
 import org.eclipse.jetty.websocket.common.message.ByteArrayMessageSink;
 import org.eclipse.jetty.websocket.common.message.ByteBufferMessageSink;
 import org.eclipse.jetty.websocket.common.message.InputStreamMessageSink;
 import org.eclipse.jetty.websocket.common.message.MessageSink;
+import org.eclipse.jetty.websocket.common.message.PartialBinaryMessage;
 import org.eclipse.jetty.websocket.common.message.PartialBinaryMessageSink;
+import org.eclipse.jetty.websocket.common.message.PartialTextMessage;
 import org.eclipse.jetty.websocket.common.message.PartialTextMessageSink;
 import org.eclipse.jetty.websocket.common.message.ReaderMessageSink;
 import org.eclipse.jetty.websocket.common.message.StringMessageSink;
-import org.eclipse.jetty.websocket.common.reflect.Arg;
-import org.eclipse.jetty.websocket.common.reflect.UnorderedSignature;
 import org.eclipse.jetty.websocket.common.util.ReflectUtils;
 
 /**
@@ -74,11 +74,11 @@ import org.eclipse.jetty.websocket.common.util.ReflectUtils;
 public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycle implements EndpointFunctions<T>
 {
     private static final Logger LOG = Log.getLogger(CommonEndpointFunctions.class);
-    
-    protected final Object endpoint;
+
+    protected final Class<?> endpointClass;
     protected final WebSocketPolicy policy;
     protected final Executor executor;
-    
+
     protected Logger endpointLog;
     private T session;
     private Function<T, Void> onOpenFunction;
@@ -87,152 +87,96 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
     private Function<Frame, Void> onFrameFunction;
     private Function<ByteBuffer, Void> onPingFunction;
     private Function<ByteBuffer, Void> onPongFunction;
-    
+
     private MessageSink onTextSink;
     private MessageSink onBinarySink;
     private MessageSink activeMessageSink;
-    
+
     private BatchMode batchMode;
-    
-    public CommonEndpointFunctions(Object endpoint, WebSocketPolicy policy, Executor executor)
+
+    public CommonEndpointFunctions(Class endpointClass, WebSocketPolicy policy, Executor executor)
     {
-        Object e = endpoint;
-        // unwrap endpoint
-        while (e instanceof ManagedEndpoint)
-            e = ((ManagedEndpoint) e).getRawEndpoint();
-        
-        Objects.requireNonNull(endpoint, "Endpoint cannot be null");
+        Objects.requireNonNull(endpointClass, "Endpoint Class cannot be null");
         Objects.requireNonNull(policy, "WebSocketPolicy cannot be null");
         Objects.requireNonNull(executor, "Executor cannot be null");
-        this.endpoint = e;
+        this.endpointClass = endpointClass;
         this.policy = policy;
         this.executor = executor;
     }
-    
+
     @Override
     protected void doStart() throws Exception
     {
-        discoverEndpointFunctions(this.endpoint);
+        discoverEndpointFunctions(this.endpointClass);
         super.doStart();
     }
-    
-    protected void discoverEndpointFunctions(Object endpoint)
+
+    protected void discoverEndpointFunctions(Class<?> endpointClass)
     {
         boolean supportAnnotations = true;
-        
+
         // Connection Listener
-        if (endpoint instanceof WebSocketConnectionListener)
+        if (WebSocketConnectionListener.class.isAssignableFrom(endpointClass))
         {
-            WebSocketConnectionListener listener = (WebSocketConnectionListener) endpoint;
-            setOnOpen((session) ->
-                    {
-                        listener.onWebSocketConnect(session);
-                        return null;
-                    },
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketConnect", Session.class)
-            );
-            setOnClose((close) ->
-                    {
-                        listener.onWebSocketClose(close.getStatusCode(), close.getReason());
-                        return null;
-                    },
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketClose", int.class, String.class)
-            );
-            setOnError((cause) ->
-                    {
-                        listener.onWebSocketError(cause);
-                        return null;
-                    },
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketError", Throwable.class));
+            Method onOpen = ReflectUtils.findMethod(endpointClass, "onWebSocketConnect", Session.class);
+            setOnOpen(new MethodHandleFunction(Session.class, onOpen), onOpen);
+            Method onClose = ReflectUtils.findMethod(endpointClass, "onWebSocketClose", int.class, String.class);
+            // TODO: need CloseInfo -> int/String layer for MethodHandle
+            setOnClose(new MethodHandleFunction(CloseInfo.class, onClose), onClose);
+            Method onError = ReflectUtils.findMethod(endpointClass, "onWebSocketError", Throwable.class);
+            setOnError(new MethodHandleFunction(Throwable.class, onError), onError);
             supportAnnotations = false;
         }
-        
+
         // Simple Data Listener
-        if (endpoint instanceof WebSocketListener)
+        if (WebSocketListener.class.isAssignableFrom(endpointClass))
         {
-            WebSocketListener listener = (WebSocketListener) endpoint;
-            
-            setOnText(new StringMessageSink(policy, (payload) ->
-                    {
-                        listener.onWebSocketText(payload);
-                        return null;
-                    }),
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketText", String.class));
-            setOnBinary(new ByteArrayMessageSink(policy, (payload) ->
-                    {
-                        listener.onWebSocketBinary(payload, 0, payload.length);
-                        return null;
-                    }),
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketBinary", byte[].class, int.class, int.class));
+            Method onText = ReflectUtils.findMethod(endpointClass, "onWebSocketText", String.class);
+            setOnText(new StringMessageSink(policy, new MethodHandleFunction<>(String.class, onText)), onText);
+            Method onBinary = ReflectUtils.findMethod(endpointClass, "onWebSocketBinary", byte[].class, int.class, int.class);
+            setOnBinary(new ByteArrayMessageSink(policy, new MethodHandleFunction<>(byte[].class, onBinary)), onBinary);
             supportAnnotations = false;
         }
-        
+
         // Ping/Pong Listener
-        if (endpoint instanceof WebSocketPingPongListener)
+        if (WebSocketPingPongListener.class.isAssignableFrom(endpointClass))
         {
-            WebSocketPingPongListener listener = (WebSocketPingPongListener) endpoint;
-            setOnPong((pong) ->
-                    {
-                        ByteBuffer payload = pong;
-                        if (pong == null)
-                            payload = BufferUtil.EMPTY_BUFFER;
-                        listener.onWebSocketPong(payload);
-                        return null;
-                    },
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketPong", ByteBuffer.class));
-            setOnPing((ping) ->
-                    {
-                        ByteBuffer payload = ping;
-                        if (ping == null)
-                            payload = BufferUtil.EMPTY_BUFFER;
-                        listener.onWebSocketPing(payload);
-                        return null;
-                    },
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketPing", ByteBuffer.class));
+            Method onPong = ReflectUtils.findMethod(endpointClass, "onWebSocketPong", ByteBuffer.class);
+            setOnPong(new MethodHandleFunction(ByteBuffer.class, onPong), onPong);
+            Method onPing = ReflectUtils.findMethod(endpointClass, "onWebSocketPing", ByteBuffer.class);
+            setOnPing(new MethodHandleFunction(ByteBuffer.class, onPing), onPing);
             supportAnnotations = false;
         }
-        
+
         // Partial Data / Message Listener
-        if (endpoint instanceof WebSocketPartialListener)
+        if (WebSocketPartialListener.class.isAssignableFrom(endpointClass))
         {
-            WebSocketPartialListener listener = (WebSocketPartialListener) endpoint;
-            setOnText(new PartialTextMessageSink((partial) ->
-                    {
-                        listener.onWebSocketPartialText(partial.getPayload(), partial.isFin());
-                        return null;
-                    }),
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketPartialText", String.class, boolean.class));
-            setOnBinary(new PartialBinaryMessageSink((partial) ->
-                    {
-                        listener.onWebSocketPartialBinary(partial.getPayload(), partial.isFin());
-                        return null;
-                    }),
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketPartialBinary", ByteBuffer.class, boolean.class));
+            Method onTextPartial = ReflectUtils.findMethod(endpointClass, "onWebSocketPartialText", String.class, boolean.class);
+            // TODO: need PartialTextMessage layer for MethodHandle
+            setOnText(new PartialTextMessageSink(new MethodHandleFunction(PartialTextMessage.class, onTextPartial)), onTextPartial);
+            Method onBinaryPartial = ReflectUtils.findMethod(endpointClass, "onWebSocketPartialBinary", ByteBuffer.class, boolean.class);
+            // TODO: need PartialBinaryMessage layer for MethodHandle
+            setOnBinary(new PartialBinaryMessageSink(new MethodHandleFunction(PartialBinaryMessage.class, onBinaryPartial)), onBinaryPartial);
             supportAnnotations = false;
         }
-        
+
         // Frame Listener
-        if (endpoint instanceof WebSocketFrameListener)
+        if (WebSocketFrameListener.class.isAssignableFrom(endpointClass))
         {
-            WebSocketFrameListener listener = (WebSocketFrameListener) endpoint;
-            setOnFrame((frame) ->
-                    {
-                        listener.onWebSocketFrame(new ReadOnlyDelegatedFrame(frame));
-                        return null;
-                    },
-                    ReflectUtils.findMethod(endpoint.getClass(), "onWebSocketFrame", Frame.class));
+            Method onFrame = ReflectUtils.findMethod(endpointClass, "onWebSocketFrame", Frame.class);
+            // TODO: need ReadOnlyDelegatedFrame layer for MethodHandle
+            setOnFrame(new MethodHandleFunction(Frame.class, onFrame), onFrame);
             supportAnnotations = false;
         }
-        
+
         if (supportAnnotations)
-            discoverAnnotatedEndpointFunctions(endpoint);
+            discoverAnnotatedEndpointFunctions(endpointClass);
     }
-    
-    protected void discoverAnnotatedEndpointFunctions(Object endpoint)
+
+    protected void discoverAnnotatedEndpointFunctions(Class<?> endpointClass)
     {
         // Test for annotated websocket endpoint
-        
-        Class<?> endpointClass = endpoint.getClass();
+
         WebSocket websocket = endpointClass.getAnnotation(WebSocket.class);
         if (websocket != null)
         {
@@ -240,210 +184,147 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             policy.setMaxBinaryMessageSize(websocket.maxBinaryMessageSize());
             policy.setMaxTextMessageSize(websocket.maxTextMessageSize());
             policy.setIdleTimeout(websocket.maxIdleTime());
-            
+
             this.batchMode = websocket.batchMode();
-            
+
             Method onmethod;
-            
+
             // OnWebSocketConnect [0..1]
             onmethod = ReflectUtils.findAnnotatedMethod(endpointClass, OnWebSocketConnect.class);
             if (onmethod != null)
             {
-                final Arg SESSION = new Arg(Session.class).required();
-                UnorderedSignature sig = new UnorderedSignature(SESSION);
-                if (sig.test(onmethod))
-                {
-                    assertSignatureValid(onmethod, OnWebSocketConnect.class);
-                    BiFunction<Object, Object[], Object> invoker = sig.newFunction(onmethod);
-                    final Object[] args = new Object[1];
-                    setOnOpen((newSession) ->
-                    {
-                        args[0] = newSession;
-                        invoker.apply(endpoint, args);
-                        return null;
-                    }, onmethod);
-                }
+                final InvokerUtils.Arg SESSION = new InvokerUtils.Arg(Session.class).required();
+                MethodHandle methodHandle = InvokerUtils.mutatedInvoker(endpointClass, onmethod, SESSION);
+                setOnOpen(new MethodHandleFunction(Session.class, methodHandle), onmethod);
             }
+
             // OnWebSocketClose [0..1]
             onmethod = ReflectUtils.findAnnotatedMethod(endpointClass, OnWebSocketClose.class);
             if (onmethod != null)
             {
-                final Arg SESSION = new Arg(Session.class);
-                final Arg STATUS_CODE = new Arg(int.class);
-                final Arg REASON = new Arg(String.class);
-                UnorderedSignature sig = new UnorderedSignature(SESSION, STATUS_CODE, REASON);
-                if (sig.test(onmethod))
-                {
-                    assertSignatureValid(onmethod, OnWebSocketClose.class);
-                    BiFunction<Object, Object[], Object> invoker = sig.newFunction(onmethod);
-                    final Object[] args = new Object[3];
-                    setOnClose((closeInfo) ->
-                    {
-                        args[0] = getSession();
-                        args[1] = closeInfo.getStatusCode();
-                        args[2] = closeInfo.getReason();
-                        invoker.apply(endpoint, args);
-                        return null;
-                    }, onmethod);
-                }
+                final InvokerUtils.Arg SESSION = new InvokerUtils.Arg(Session.class);
+                final InvokerUtils.Arg STATUS_CODE = new InvokerUtils.Arg(int.class);
+                final InvokerUtils.Arg REASON = new InvokerUtils.Arg(String.class);
+                MethodHandle methodHandle = InvokerUtils.mutatedInvoker(endpointClass, onmethod, SESSION, STATUS_CODE, REASON);
+                // TODO: need mutation of args ...
+                // Session + CloseInfo ->
+                // setOnClose((closeInfo) ->{
+                // args[0] = getSession();
+                // args[1] = closeInfo.getStatusCode();
+                // args[2] = closeInfo.getReason();
+                // invoker.apply(endpoint, args);
+                setOnClose(new MethodHandleFunction(CloseInfo.class, methodHandle), onmethod);
             }
+
             // OnWebSocketError [0..1]
             onmethod = ReflectUtils.findAnnotatedMethod(endpointClass, OnWebSocketError.class);
             if (onmethod != null)
             {
-                final Arg SESSION = new Arg(Session.class);
-                final Arg CAUSE = new Arg(Throwable.class).required();
-                UnorderedSignature sig = new UnorderedSignature(SESSION, CAUSE);
-                if(sig.test(onmethod))
-                {
-                    assertSignatureValid(onmethod, OnWebSocketError.class);
-                    BiFunction<Object,Object[],Object> invoker = sig.newFunction(onmethod);
-                    final Object[] args = new Object[2];
-                    setOnError((throwable) -> {
-                        args[0] = getSession();
-                        args[1] = throwable;
-                        invoker.apply(endpoint, args);
-                        return null;
-                    }, onmethod);
-                }
+                final InvokerUtils.Arg SESSION = new InvokerUtils.Arg(Session.class);
+                final InvokerUtils.Arg CAUSE = new InvokerUtils.Arg(Throwable.class).required();
+                MethodHandle methodHandle = InvokerUtils.mutatedInvoker(endpointClass, onmethod, SESSION, CAUSE);
+                setOnError(new MethodHandleFunction<>(Throwable.class, methodHandle), onmethod);
             }
+
             // OnWebSocketFrame [0..1]
             onmethod = ReflectUtils.findAnnotatedMethod(endpointClass, OnWebSocketFrame.class);
             if (onmethod != null)
             {
-                final Arg SESSION = new Arg(Session.class);
-                final Arg FRAME = new Arg(Frame.class).required();
-                UnorderedSignature sig = new UnorderedSignature(SESSION, FRAME);
-                if(sig.test(onmethod))
-                {
-                    assertSignatureValid(onmethod, OnWebSocketFrame.class);
-                    BiFunction<Object,Object[],Object> invoker = sig.newFunction(onmethod);
-                    final Object[] args = new Object[2];
-                    setOnFrame((frame) -> {
-                        args[0] = getSession();
-                        args[1] = frame;
-                        invoker.apply(endpoint, args);
-                        return null;
-                    }, onmethod);
-                }
+                final InvokerUtils.Arg SESSION = new InvokerUtils.Arg(Session.class);
+                final InvokerUtils.Arg FRAME = new InvokerUtils.Arg(Frame.class).required();
+                MethodHandle methodHandle = InvokerUtils.mutatedInvoker(endpointClass, onmethod, SESSION, FRAME);
+                setOnFrame(new MethodHandleFunction(Frame.class, methodHandle), onmethod);
             }
             // OnWebSocketMessage [0..2]
             Method onMessages[] = ReflectUtils.findAnnotatedMethods(endpointClass, OnWebSocketMessage.class);
             if (onMessages != null && onMessages.length > 0)
             {
-                Arg SESSION = new Arg(Session.class);
-                
-                Arg TEXT = new Arg(String.class).required();
-                UnorderedSignature sigText = new UnorderedSignature(SESSION, TEXT);
-                
-                Arg BYTE_BUFFER = new Arg(ByteBuffer.class).required();
-                UnorderedSignature sigBinaryBuffer = new UnorderedSignature(SESSION, BYTE_BUFFER);
-                
-                Arg BYTE_ARRAY = new Arg(byte[].class).required();
-                Arg OFFSET = new Arg(int.class);
-                Arg LENGTH = new Arg(int.class);
-                UnorderedSignature sigBinaryArray = new UnorderedSignature(SESSION, BYTE_ARRAY, OFFSET, LENGTH);
-                
-                Arg INPUT_STREAM = new Arg(InputStream.class).required();
-                UnorderedSignature sigInputStream = new UnorderedSignature(SESSION, INPUT_STREAM);
-                
-                Arg READER = new Arg(Reader.class).required();
-                UnorderedSignature sigReader = new UnorderedSignature(SESSION, READER);
-                
-                for (Method onMsg : onMessages)
+                // The different kind of @OnWebSocketMessage method parameter signatures expected
+
+                InvokerUtils.Arg textCallingArgs[] = new InvokerUtils.Arg[]{
+                        new InvokerUtils.Arg(Session.class),
+                        new InvokerUtils.Arg(String.class).required()
+                };
+
+                InvokerUtils.Arg binaryBufferCallingArgs[] = new InvokerUtils.Arg[]{
+                        new InvokerUtils.Arg(Session.class),
+                        new InvokerUtils.Arg(ByteBuffer.class).required()
+                };
+
+                InvokerUtils.Arg binaryArrayCallingArgs[] = new InvokerUtils.Arg[]{
+                        new InvokerUtils.Arg(Session.class),
+                        new InvokerUtils.Arg(byte[].class).required(),
+                        new InvokerUtils.Arg(int.class), // offset
+                        new InvokerUtils.Arg(int.class) // length
+                };
+
+                InvokerUtils.Arg inputStreamCallingArgs[] = new InvokerUtils.Arg[]{
+                        new InvokerUtils.Arg(Session.class),
+                        new InvokerUtils.Arg(InputStream.class).required()
+                };
+
+                InvokerUtils.Arg readerCallingArgs[] = new InvokerUtils.Arg[]{
+                        new InvokerUtils.Arg(Session.class),
+                        new InvokerUtils.Arg(Reader.class).required()
+                };
+
+                onmessageloop: for (Method onMsg : onMessages)
                 {
-                    if(sigText.test(onMsg))
+                    MethodHandle methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, InvokerUtils.PARAM_IDENTITY, textCallingArgs);
+                    if (methodHandle != null)
                     {
                         // Normal Text Message
                         assertSignatureValid(onMsg, OnWebSocketMessage.class);
-                        BiFunction<Object, Object[], Object> invoker = sigText.newFunction(onMsg);
-                        final Object[] args = new Object[2];
-                        StringMessageSink messageSink = new StringMessageSink(policy,
-                                (msg) ->
-                                {
-                                    args[0] = getSession();
-                                    args[1] = msg;
-                                    invoker.apply(endpoint, args);
-                                    return null;
-                                });
-                        setOnText(messageSink, onMsg);
+                        setOnText(new StringMessageSink(policy, new MethodHandleFunction(String.class, methodHandle)), onMsg);
+                        break onmessageloop;
                     }
-                    else if (sigBinaryBuffer.test(onMsg))
+
+                    methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, InvokerUtils.PARAM_IDENTITY, binaryBufferCallingArgs);
+                    if (methodHandle != null)
                     {
                         // ByteBuffer Binary Message
                         assertSignatureValid(onMsg, OnWebSocketMessage.class);
-                        BiFunction<Object, Object[], Object> invoker = sigBinaryBuffer.newFunction(onMsg);
-                        final Object[] args = new Object[2];
-                        ByteBufferMessageSink messageSink = new ByteBufferMessageSink(policy,
-                                (buffer) ->
-                                {
-                                    args[0] = getSession();
-                                    args[1] = buffer;
-                                    invoker.apply(endpoint, args);
-                                    return null;
-                                });
-                        setOnBinary(messageSink, onMsg);
+                        setOnBinary(new ByteBufferMessageSink(policy, new MethodHandleFunction(ByteBuffer.class, methodHandle)), onMsg);
+                        break onmessageloop;
                     }
-                    else if (sigBinaryArray.test(onMsg))
+
+                    methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, InvokerUtils.PARAM_IDENTITY, binaryArrayCallingArgs);
+                    if (methodHandle != null)
                     {
                         // byte[] Binary Message
                         assertSignatureValid(onMsg, OnWebSocketMessage.class);
-                        BiFunction<Object, Object[], Object> invoker = sigBinaryArray.newFunction(onMsg);
-                        final Object[] args = new Object[4];
-                        ByteArrayMessageSink messageSink = new ByteArrayMessageSink(policy,
-                                (buffer) ->
-                                {
-                                    args[0] = getSession();
-                                    args[1] = buffer;
-                                    args[2] = 0;
-                                    args[3] = buffer.length;
-                                    invoker.apply(endpoint, args);
-                                    return null;
-                                });
-                        setOnBinary(messageSink, onMsg);
+                        setOnBinary(new ByteBufferMessageSink(policy, new MethodHandleFunction(byte[].class, methodHandle)), onMsg);
+                        // TODO: split ByteBuffer into byte[], offset, length ?
+                        break onmessageloop;
                     }
-                    else if (sigInputStream.test(onMsg))
+
+                    methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, InvokerUtils.PARAM_IDENTITY, inputStreamCallingArgs);
+                    if (methodHandle != null)
                     {
                         // InputStream Binary Message
                         assertSignatureValid(onMsg, OnWebSocketMessage.class);
-                        BiFunction<Object, Object[], Object> invoker = sigInputStream.newFunction(onMsg);
-                        final Object[] args = new Object[2];
-                        InputStreamMessageSink messageSink = new InputStreamMessageSink(executor,
-                                (stream) ->
-                                {
-                                    args[0] = getSession();
-                                    args[1] = stream;
-                                    invoker.apply(endpoint, args);
-                                    return null;
-                                });
-                        setOnBinary(messageSink, onMsg);
+                        setOnBinary(new InputStreamMessageSink(executor, new MethodHandleFunction(InputStream.class, methodHandle)), onMsg);
+                        break onmessageloop;
                     }
-                    else if (sigReader.test(onMsg))
+
+                    methodHandle = InvokerUtils.optionalMutatedInvoker(endpointClass, onMsg, InvokerUtils.PARAM_IDENTITY, readerCallingArgs);
+                    if (methodHandle != null)
                     {
                         // Reader Text Message
                         assertSignatureValid(onMsg, OnWebSocketMessage.class);
-                        BiFunction<Object, Object[], Object> invoker = sigReader.newFunction(onMsg);
-                        final Object[] args = new Object[2];
-                        ReaderMessageSink messageSink = new ReaderMessageSink(executor,
-                                (reader) ->
-                                {
-                                    args[0] = getSession();
-                                    args[1] = reader;
-                                    invoker.apply(endpoint, args);
-                                    return null;
-                                });
-                        setOnText(messageSink, onMsg);
+                        setOnBinary(new ReaderMessageSink(executor, new MethodHandleFunction(Reader.class, methodHandle)), onMsg);
+                        break onmessageloop;
                     }
                     else
                     {
                         // Not a valid @OnWebSocketMessage declaration signature
-                        throw InvalidSignatureException.build(endpoint.getClass(), OnWebSocketMessage.class, onMsg);
+                        throw InvalidSignatureException.build(endpointClass, OnWebSocketMessage.class, onMsg);
                     }
                 }
             }
         }
     }
-    
+
     private void assertSignatureValid(Method method, Class<? extends Annotation> annotationClass)
     {
         // Test modifiers
@@ -453,89 +334,89 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             StringBuilder err = new StringBuilder();
             err.append("@").append(annotationClass.getSimpleName());
             err.append(" method must be public: ");
-            ReflectUtils.append(err, endpoint.getClass(), method);
+            ReflectUtils.append(err, endpointClass, method);
             throw new InvalidSignatureException(err.toString());
         }
-        
+
         if (Modifier.isStatic(mods))
         {
             StringBuilder err = new StringBuilder();
             err.append("@").append(annotationClass.getSimpleName());
             err.append(" method must not be static: ");
-            ReflectUtils.append(err, endpoint.getClass(), method);
+            ReflectUtils.append(err, endpointClass, method);
             throw new InvalidSignatureException(err.toString());
         }
-        
+
         // Test return type
         Class<?> returnType = method.getReturnType();
         if ((returnType == Void.TYPE) || (returnType == Void.class))
         {
-            // Void is 100% valid, always
+            // For the Jetty Native WebSocket API, void is only supported case
             return;
         }
-        
+
         StringBuilder err = new StringBuilder();
         err.append("@").append(annotationClass.getSimpleName());
         err.append(" return must be void: ");
-        ReflectUtils.append(err, endpoint.getClass(), method);
+        ReflectUtils.append(err, endpointClass, method);
         throw new InvalidSignatureException(err.toString());
     }
-    
+
     protected void clearOnPongFunction()
     {
         onPongFunction = null;
     }
-    
+
     protected void clearOnTextSink()
     {
         onTextSink = null;
     }
-    
+
     protected void clearOnBinarySink()
     {
         onBinarySink = null;
     }
-    
+
     public BatchMode getBatchMode()
     {
         return batchMode;
     }
-    
+
     public Executor getExecutor()
     {
         return executor;
     }
-    
+
     public Logger getLog()
     {
-        if(endpointLog == null)
+        if (endpointLog == null)
         {
-            endpointLog = Log.getLogger(endpoint.getClass());
+            endpointLog = Log.getLogger(endpointClass);
         }
-        
+
         return endpointLog;
     }
-    
+
     public T getSession()
     {
         return session;
     }
-    
+
     protected MessageSink getOnTextSink()
     {
         return onTextSink;
     }
-    
+
     protected MessageSink getOnBinarySink()
     {
         return onBinarySink;
     }
-    
+
     protected Function<ByteBuffer, Void> getOnPongFunction()
     {
         return onPongFunction;
     }
-    
+
     protected void setOnOpen(Function<T, Void> function, Object origin)
     {
         assertNotSet(this.onOpenFunction, "Open Handler", origin);
@@ -545,7 +426,7 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             LOG.debug("Assigned onOpen to " + describeOrigin(origin));
         }
     }
-    
+
     protected void setOnClose(Function<CloseInfo, Void> function, Object origin)
     {
         assertNotSet(this.onCloseFunction, "Close Handler", origin);
@@ -555,7 +436,7 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             LOG.debug("Assigned onClose to " + describeOrigin(origin));
         }
     }
-    
+
     protected void setOnError(Function<Throwable, Void> function, Object origin)
     {
         assertNotSet(this.onErrorFunction, "Error Handler", origin);
@@ -565,7 +446,7 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             LOG.debug("Assigned onError to " + describeOrigin(origin));
         }
     }
-    
+
     protected void setOnText(MessageSink messageSink, Object origin)
     {
         assertNotSet(this.onTextSink, "TEXT Handler", origin);
@@ -575,7 +456,7 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             LOG.debug("Assigned onText to " + describeOrigin(origin));
         }
     }
-    
+
     protected void setOnBinary(MessageSink messageSink, Object origin)
     {
         assertNotSet(this.onBinarySink, "BINARY Handler", origin);
@@ -585,7 +466,7 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             LOG.debug("Assigned onBinary to " + describeOrigin(origin));
         }
     }
-    
+
     protected void setOnFrame(Function<Frame, Void> function, Object origin)
     {
         assertNotSet(this.onFrameFunction, "Frame Handler", origin);
@@ -595,7 +476,7 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             LOG.debug("Assigned onFrame to " + describeOrigin(origin));
         }
     }
-    
+
     protected void setOnPing(Function<ByteBuffer, Void> function, Object origin)
     {
         assertNotSet(this.onPingFunction, "Ping Handler", origin);
@@ -605,7 +486,7 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             LOG.debug("Assigned onPing to " + describeOrigin(origin));
         }
     }
-    
+
     protected void setOnPong(Function<ByteBuffer, Void> function, Object origin)
     {
         assertNotSet(this.onPongFunction, "Pong Handler", origin);
@@ -615,175 +496,185 @@ public class CommonEndpointFunctions<T extends Session> extends AbstractLifeCycl
             LOG.debug("Assigned onPong to " + describeOrigin(origin));
         }
     }
-    
+
     public boolean hasBinarySink()
     {
         return this.onBinarySink != null;
     }
-    
+
     public boolean hasTextSink()
     {
         return this.onTextSink != null;
     }
-    
+
     public boolean hasOnOpen()
     {
         return this.onOpenFunction != null;
     }
-    
+
     public boolean hasOnClose()
     {
         return this.onCloseFunction != null;
     }
-    
+
     public boolean hasOnError()
     {
         return this.onErrorFunction != null;
     }
-    
+
     public boolean hasOnFrame()
     {
         return this.onFrameFunction != null;
     }
-    
+
     private String describeOrigin(Object obj)
     {
         if (obj == null)
         {
             return "<undefined>";
         }
-        
+
         return obj.toString();
     }
-    
+
     private void assertNotSet(Object val, String role, Object origin)
     {
         if (val == null)
             return;
-        
+
         StringBuilder err = new StringBuilder();
         err.append("Cannot replace previously assigned [");
         err.append(role);
         err.append("] at ").append(describeOrigin(val));
         err.append(" with ");
         err.append(describeOrigin(origin));
-        
+
         throw new InvalidWebSocketException(err.toString());
     }
-    
+
     @Override
     public void onOpen(T session)
     {
         assertIsStarted();
-        
+
         // Always set session in endpoint functions
         this.session = session;
-        
+
         // Call (optional) on open method
         // TODO: catch end user throwables
         if (onOpenFunction != null)
             onOpenFunction.apply(this.session);
     }
-    
+
     @Override
     public void onClose(CloseInfo close)
     {
         assertIsStarted();
-        
+
         // TODO: catch end user throwables
         if (onCloseFunction != null)
             onCloseFunction.apply(close);
     }
-    
+
     @Override
     public void onFrame(Frame frame)
     {
         assertIsStarted();
-    
+
         // TODO: catch end user throwables
         if (onFrameFunction != null)
             onFrameFunction.apply(frame);
     }
-    
+
     @Override
     public void onError(Throwable cause)
     {
         assertIsStarted();
-    
+
         if (onErrorFunction != null)
             onErrorFunction.apply(cause);
         else
             LOG.debug(cause);
     }
-    
+
     @Override
     public void onText(Frame frame, FrameCallback callback)
     {
         assertIsStarted();
-        
+
         if (activeMessageSink == null)
             activeMessageSink = onTextSink;
-    
+
         acceptMessage(frame, callback);
     }
-    
+
     @Override
     public void onBinary(Frame frame, FrameCallback callback)
     {
         assertIsStarted();
-        
+
         if (activeMessageSink == null)
             activeMessageSink = onBinarySink;
-    
+
         acceptMessage(frame, callback);
     }
-    
+
     @Override
     public void onContinuation(Frame frame, FrameCallback callback)
     {
         // TODO: catch end user throwables
         acceptMessage(frame, callback);
     }
-    
+
     private void acceptMessage(Frame frame, FrameCallback callback)
     {
         // No message sink is active
         if (activeMessageSink == null)
             return;
-        
+
         // Accept the payload into the message sink
         // TODO: catch end user throwables
         activeMessageSink.accept(frame, callback);
         if (frame.isFin())
             activeMessageSink = null;
     }
-    
+
     @Override
     public void onPing(ByteBuffer payload)
     {
         assertIsStarted();
-    
+
         // TODO: catch end user throwables
         if (onPingFunction != null)
+        {
+            if (payload == null)
+                payload = BufferUtil.EMPTY_BUFFER;
+
             onPingFunction.apply(payload);
+        }
     }
-    
+
     @Override
     public void onPong(ByteBuffer payload)
     {
         assertIsStarted();
-    
+
         // TODO: catch end user throwables
         if (onPongFunction != null)
+        {
+            if (payload == null)
+                payload = BufferUtil.EMPTY_BUFFER;
+
             onPongFunction.apply(payload);
+        }
     }
-    
+
     private void assertIsStarted()
     {
         if (!isStarted())
             throw new IllegalStateException(this.getClass().getName() + " not started");
     }
-    
+
     @Override
     public String toString()
     {

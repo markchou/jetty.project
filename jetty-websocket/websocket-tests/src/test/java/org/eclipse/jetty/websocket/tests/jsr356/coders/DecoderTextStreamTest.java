@@ -36,7 +36,7 @@ import javax.websocket.Decoder;
 
 import org.eclipse.jetty.toolchain.test.MavenTestingUtils;
 import org.eclipse.jetty.websocket.common.WebSocketFrame;
-import org.eclipse.jetty.websocket.common.function.EndpointFunctions;
+import org.eclipse.jetty.websocket.common.EndpointFunctions;
 import org.eclipse.jetty.websocket.common.io.CompletableFutureFrameCallback;
 import org.eclipse.jetty.websocket.jsr356.JsrSession;
 import org.eclipse.jetty.websocket.jsr356.messages.DecodedReaderMessageSink;

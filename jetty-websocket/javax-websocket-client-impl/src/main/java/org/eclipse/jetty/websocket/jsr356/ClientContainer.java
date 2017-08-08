@@ -54,7 +54,7 @@ import org.eclipse.jetty.websocket.client.ClientUpgradeRequest;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
 import org.eclipse.jetty.websocket.client.io.UpgradeListener;
 import org.eclipse.jetty.websocket.common.WebSocketSession;
-import org.eclipse.jetty.websocket.common.function.EndpointFunctions;
+import org.eclipse.jetty.websocket.common.EndpointFunctions;
 import org.eclipse.jetty.websocket.common.scopes.DelegatedContainerScope;
 import org.eclipse.jetty.websocket.common.scopes.SimpleContainerScope;
 import org.eclipse.jetty.websocket.common.scopes.WebSocketContainerScope;
@@ -156,7 +156,8 @@ public class ClientContainer extends ContainerLifeCycle implements WebSocketCont
                                                     Map<String, String> pathParameters,
                                                     EndpointConfig config)
     {
-        return new JsrEndpointFunctions(endpoint,
+        // TODO: should probably start from existing/prior functions
+        return new JsrEndpointFunctions(endpoint.getClass(),
                 sessionPolicy,
                 getExecutor(),
                 availableEncoders,
